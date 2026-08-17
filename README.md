@@ -2,11 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-cl-websocket-kit implements RFC 6455 together with a bounded HTTP/1.1 and
-network transport layer: frame encoding and decoding, masking, fragmentation,
-control frames, close codes, UTF-8 validation, bounded message assembly, the
-HTTP Upgrade handshake, persistent HTTP/1.1 connections, TCP client/listener
-lifecycle, optional TLS, and HTTP CONNECT/SOCKS5 proxy traversal.
+cl-websocket-kit implements RFC 6455 together with a bounded HTTP/1.1, HTTP/2,
+and HTTP/3 network transport layer: frame encoding and decoding, masking,
+fragmentation, control frames, close codes, UTF-8 validation, bounded message
+assembly, the permessage-deflate extension, the HTTP Upgrade handshake,
+persistent HTTP/1.1 connections, HTTP/2 and HTTP/3 extended CONNECT
+bootstrapping, TCP client/listener lifecycle, optional TLS, and HTTP
+CONNECT/SOCKS5 proxy traversal.
 
 It uses
 [cl-http-message-kit](https://github.com/nerima-lisp/cl-http-message-kit) for
