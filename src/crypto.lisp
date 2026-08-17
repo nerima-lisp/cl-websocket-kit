@@ -175,6 +175,10 @@
     (%websocket-protocol-error
      "Sec-WebSocket-Key must be a Base64 string."
      sec-websocket-key))
+  (unless (= (length sec-websocket-key) 24)
+    (%websocket-protocol-error
+     "Sec-WebSocket-Key must be the 24-character Base64 form of 16 octets."
+     (length sec-websocket-key)))
   (let ((decoded (%websocket-base64-decode sec-websocket-key)))
     (unless (= (length decoded) 16)
       (%websocket-protocol-error

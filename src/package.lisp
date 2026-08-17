@@ -8,34 +8,66 @@
                 #:http-request-p
                 #:http-request-protocol-version
                 #:http-request-method
+                #:http-request-uri
+                #:http-request-target
                 #:http-request-headers
+                #:http-request-body
+                #:http-request-trailers
+                #:http-request-authority
                 #:make-http-request
                 #:http-response
                 #:http-response-p
                 #:http-response-protocol-version
                 #:http-response-status
+                #:http-response-reason
                 #:http-response-headers
+                #:http-response-body
+                #:http-response-trailers
                 #:make-http-response
                 #:http-header
                 #:http-header-p
                 #:http-header-name
+                #:http-header-content
                 #:http-header-values
-                #:make-http-header)
+                #:http-header-value
+                #:make-http-header
+                #:make-http-uri
+                #:parse-http-uri
+                #:http-uri-p
+                #:http-uri-scheme
+                #:http-uri-authority
+                #:http-uri-host
+                #:http-uri-port
+                #:http-uri-path
+                #:http-uri-query
+                #:http-uri-string)
   (:export
    ;; Conditions
    #:websocket-error
    #:websocket-error-message
    #:websocket-error-operation
    #:websocket-error-detail
+   #:websocket-invalid-data
    #:websocket-size-limit-exceeded
    #:websocket-size-limit-exceeded-limit
    #:websocket-size-limit-exceeded-observed
    #:websocket-size-limit-exceeded-kind
+   #:websocket-protocol-error
+   #:websocket-http-error
+   #:websocket-timeout
+   #:websocket-timeout-kind
+   #:websocket-transport-error
+   #:websocket-transport-error-cause
+   #:websocket-flow-control-error
+   #:websocket-flow-control-error-window
+   #:websocket-flow-control-error-required
+   #:websocket-flow-control-error-kind
    ;; Frames
    #:websocket-frame
    #:websocket-frame-p
    #:websocket-frame-fin-p
    #:websocket-frame-opcode
+   #:websocket-frame-reserved-bits
    #:websocket-frame-mask-p
    #:websocket-frame-masking-key
    #:websocket-frame-payload
@@ -51,12 +83,240 @@
    #:websocket-pong
    #:websocket-close
    #:serve-websocket-session
+   ;; RFC 7692 permessage-deflate
+   #:+websocket-permessage-deflate-rsv1+
+   #:websocket-permessage-deflate
+   #:websocket-permessage-deflate-p
+   #:websocket-permessage-deflate-encoder
+   #:websocket-permessage-deflate-decoder
+   #:websocket-permessage-deflate-frame-validator
+   #:make-websocket-permessage-deflate
+   #:websocket-permessage-deflate-compress
+   #:websocket-permessage-deflate-decompress
+   #:make-websocket-permessage-deflate-decoder
+   #:make-websocket-permessage-deflate-frame-validator
+   #:websocket-permessage-deflate-extension
+   ;; HTTP/1.1 wire codec
+   #:+websocket-default-max-payload-bytes+
+   #:+websocket-default-max-fragments+
+   #:+websocket-default-max-control-frames+
+   #:+websocket-default-max-header-bytes+
+   #:+websocket-default-max-header-fields+
+   #:+websocket-default-max-body-bytes+
+   #:serialize-http-request
+   #:serialize-http-request-body
+   #:serialize-http-response
+   #:parse-http-request
+   #:parse-http-response
+   #:write-http-request
+   #:write-http-request-body
+   #:write-http-response
+   #:read-http-request
+   #:read-http-response
+   #:http-request-reusable-p
+   #:http-response-reusable-p
+   #:serve-http-connection
+   #:perform-http-request
+   ;; HTTP/2 and HTTP/3 extended CONNECT codec boundaries
+   #:+websocket-http2-default-max-frame-size+
+   #:+websocket-http3-default-max-frame-size+
+   #:+websocket-http3-default-qpack-max-table-capacity+
+   #:+websocket-http3-default-qpack-encoder-table-capacity+
+   #:+websocket-http3-default-qpack-blocked-streams+
+   #:+websocket-http2-default-hpack-table-size+
+   #:+websocket-http2-3-default-max-buffered-wire-bytes+
+   #:+websocket-http2-3-default-initial-window-size+
+   #:websocket-http2-connection-preface
+   #:http-pseudo-header-p
+   #:make-http-pseudo-header
+   #:make-websocket-http2-connect-headers
+   #:make-websocket-http3-connect-headers
+   #:make-websocket-http2-connect-response-headers
+   #:make-websocket-http3-connect-response-headers
+   #:websocket-http2-extended-connect-p
+   #:websocket-http3-extended-connect-p
+   #:websocket-http2-connect-response-p
+   #:websocket-http3-connect-response-p
+   #:websocket-http2-hpack-context
+   #:websocket-http2-hpack-context-p
+   #:make-websocket-http2-hpack-context
+   #:websocket-http2-hpack-context-size
+   #:websocket-http2-hpack-context-max-size
+   #:websocket-http2-hpack-context-maximum-size
+   #:set-websocket-http2-hpack-context-max-size
+   #:set-websocket-http2-hpack-context-maximum-size
+   #:encode-websocket-http2-headers
+   #:decode-websocket-http2-headers
+   #:encode-websocket-http3-headers
+   #:decode-websocket-http3-headers
+   #:encode-websocket-http2-headers-frames
+   #:decode-websocket-http2-headers-frames
+   #:encode-websocket-http2-data-frame
+   #:encode-websocket-http2-data-frames
+   #:decode-websocket-http2-data-frame
+   #:encode-websocket-http3-headers-frame
+   #:decode-websocket-http3-headers-frame
+   #:encode-websocket-http3-data-frame
+   #:encode-websocket-http3-data-frames
+   #:decode-websocket-http3-data-frame
+   #:encode-websocket-http2-message-data-frames
+   #:decode-websocket-http2-websocket-data-frames
+   #:encode-websocket-http3-message-data-frames
+   #:decode-websocket-http3-websocket-data-frames
+   ;; Incremental HTTP/2 and HTTP/3 WebSocket sessions
+   #:websocket-http2-3-session
+   #:websocket-http2-3-session-p
+   #:websocket-http2-3-session-protocol
+   #:websocket-http2-3-session-stream-id
+   #:websocket-http2-3-session-max-buffered-wire-bytes
+   #:websocket-http2-3-session-max-frames
+   #:websocket-http2-3-session-frame-count
+   #:websocket-http2-3-session-closed-p
+   #:websocket-http2-3-session-local-end-p
+   #:websocket-http2-3-session-remote-end-p
+   #:make-websocket-http2-session
+   #:make-websocket-http3-session
+   #:websocket-http2-3-session-send
+   #:websocket-http2-session-send
+   #:websocket-http3-session-send
+   #:websocket-http2-3-session-receive
+   #:websocket-http2-session-receive
+   #:websocket-http3-session-receive
+   #:websocket-http2-3-session-close
+   #:websocket-http2-session-close
+   #:websocket-http3-session-close
+   #:websocket-http2-3-session-abort
+   #:websocket-http2-session-abort
+   #:websocket-http3-session-abort
+   #:encode-websocket-http2-connect-settings
+   #:decode-websocket-http2-connect-settings
+   #:websocket-http2-connect-protocol-enabled-p
+   #:encode-websocket-http3-connect-settings
+   #:decode-websocket-http3-connect-settings
+   #:websocket-http3-connect-protocol-enabled-p
+   ;; HTTP/2 and HTTP/3 connection coordinators
+   #:websocket-http2-3-connection
+   #:websocket-http2-3-connection-p
+   #:websocket-http2-3-connection-protocol
+   #:websocket-http2-3-connection-role
+   #:websocket-http2-3-connection-closed-p
+   #:websocket-http2-3-connection-local-end-p
+   #:websocket-http2-3-connection-remote-end-p
+   #:websocket-http2-3-connection-max-concurrent-streams
+   #:websocket-http2-3-connection-max-frame-size
+   #:websocket-http2-3-connection-hpack-encoder-context
+   #:websocket-http2-3-connection-hpack-decoder-context
+   #:websocket-http2-3-connection-hpack-huffman-p
+   #:websocket-http2-3-connection-h3-qpack-huffman-p
+   #:websocket-http2-3-connection-h3-qpack-encoder-table
+   #:websocket-http2-3-connection-h3-qpack-decoder-table
+   #:websocket-http2-3-connection-h3-qpack-encoder-stream-id
+   #:websocket-http2-3-connection-h3-qpack-decoder-stream-id
+   #:websocket-http2-3-connection-h3-qpack-peer-encoder-stream-id
+   #:websocket-http2-3-connection-h3-qpack-peer-decoder-stream-id
+   #:websocket-http2-3-connection-h3-qpack-encoder-events
+   #:websocket-http2-3-connection-h3-qpack-decoder-events
+   #:websocket-http2-3-connection-h3-qpack-max-table-capacity
+   #:websocket-http2-3-connection-h3-qpack-blocked-streams
+   #:websocket-http2-3-connection-h3-max-field-section-size
+   #:websocket-http2-3-connection-h3-peer-max-field-section-size
+   #:websocket-http2-3-connection-h3-peer-qpack-max-table-capacity
+   #:websocket-http2-3-connection-h3-peer-qpack-blocked-streams
+   #:websocket-http2-3-connection-send-window
+   #:websocket-http2-3-connection-receive-window
+   #:websocket-http2-3-connection-peer-settings
+   #:websocket-http2-3-connection-h3-control-stream-id
+   #:websocket-http2-3-connection-h3-peer-control-stream-id
+   #:websocket-http2-3-connection-streams
+   #:make-websocket-http2-connection
+   #:make-websocket-http3-connection
+   #:websocket-http2-3-connection-start
+   #:websocket-http2-3-connection-pump
+   #:websocket-http2-3-connection-feed
+   #:websocket-http3-connection-feed-stream
+   #:websocket-http3-connection-send-qpack-encoder-instructions
+   #:websocket-http3-connection-send-qpack-decoder-instructions
+   #:websocket-http2-3-connection-open-stream
+   #:websocket-http2-3-connection-accept-stream
+   #:websocket-http2-3-connection-stream
+   #:websocket-http2-3-connection-close
+   #:websocket-http2-3-connection-abort
+   #:websocket-http2-3-connection-update-send-window
+   #:websocket-http2-3-connection-consume
+   #:websocket-http2-3-stream
+   #:websocket-http2-3-stream-p
+   #:websocket-http2-3-stream-connection
+   #:websocket-http2-3-stream-id
+   #:websocket-http2-3-stream-session
+   #:websocket-http2-3-stream-headers
+   #:websocket-http2-3-stream-trailers
+   #:websocket-http2-3-stream-local-end-p
+   #:websocket-http2-3-stream-remote-end-p
+   #:websocket-http2-3-stream-send-window
+   #:websocket-http2-3-stream-receive-window
+   #:websocket-http2-3-stream-consume
+   #:websocket-http2-3-stream-update-send-window
+   #:websocket-http2-connection-open-stream
+   #:websocket-http3-connection-open-stream
    ;; Handshake
    #:websocket-accept-key
    #:websocket-upgrade-request-p
    #:websocket-upgrade-response
+   #:make-websocket-origin-policy
    #:make-websocket-upgrade-request
    #:websocket-client-handshake
+   ;; Network transport and connection lifecycle
+   #:generate-websocket-key
+   #:websocket-proxy
+   #:websocket-proxy-p
+   #:websocket-proxy-type
+   #:websocket-proxy-host
+   #:websocket-proxy-port
+   #:websocket-proxy-username
+   #:websocket-proxy-password
+   #:websocket-proxy-headers
+   #:websocket-proxy-tls-upgrader
+   #:make-http-connect-proxy
+   #:make-socks5-proxy
+   #:websocket-connection
+   #:websocket-connection-p
+   #:websocket-connection-stream
+   #:websocket-connection-listener
+   #:websocket-connection-request
+   #:websocket-connection-response
+   #:websocket-connection-selected-protocol
+   #:websocket-connection-selected-extensions
+   #:websocket-connection-payload-encoder
+   #:websocket-connection-payload-decoder
+   #:websocket-connection-payload-reserved-bits
+   #:websocket-connection-peer-address
+   #:websocket-connection-peer-port
+   #:websocket-connection-closed-p
+   #:websocket-connection-state
+   #:websocket-connection-close-code
+   #:websocket-connection-close-reason
+   #:websocket-connection-close-condition
+   #:connect-websocket
+   #:open-websocket-client
+   #:close-websocket-connection
+   #:websocket-send
+   #:websocket-receive
+   #:websocket-listener
+   #:websocket-listener-p
+   #:websocket-listener-address
+   #:websocket-listener-port
+   #:websocket-listener-address-family
+   #:websocket-listener-closed-p
+   #:websocket-listener-active-connections
+   #:websocket-listener-total-connections
+   #:+websocket-default-handshake-timeout+
+   #:open-websocket-listener
+   #:accept-websocket-connection
+   #:serve-websocket-listener
+   #:close-websocket-listener
+   #:make-websocket-tls-upgrader
+   #:make-websocket-tls-server-wrapper
+   #:websocket-tls-selected-alpn-protocol
    ;; Close payloads
    #:websocket-valid-close-code-p
    #:make-websocket-close-payload
