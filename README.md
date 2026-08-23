@@ -51,7 +51,7 @@ validates, and calls a function you supply to carry out the HTTP/1.1 exchange:
 ```
 
 The function receives the request and stream plus `:timeout`, `:deadline`,
-`:max-header-bytes`, `:max-body-bytes`, `:collect-body-p` and
+`:max-header-bytes`, `:max-body-bytes`, `:max-fields`, `:collect-body-p` and
 `:clock-function`, and must return the response and, as a second value,
 whether the connection is reusable.
 
@@ -181,13 +181,14 @@ before enabling the matching RSV bit.
 | --- | --- |
 | Frames | `make-websocket-frame`, `serialize-websocket-frame`, `parse-websocket-frame`, `read-websocket-frame`, `write-websocket-frame`, and the `websocket-frame-*` accessors |
 | Messages | `read-websocket-message`, `write-websocket-message`, `websocket-ping`, `websocket-pong`, `websocket-close`, `serve-websocket-session` |
-| HTTP/1.1 | `serialize-http-request`, `serialize-http-response`, `parse-http-request`, `parse-http-response`, `read-http-request`, `read-http-response`, `serve-http-connection`, `perform-http-request` |
+| Permessage-deflate (RFC 7692) | `make-websocket-permessage-deflate`, `websocket-permessage-deflate-compress`, `websocket-permessage-deflate-decompress`, `make-websocket-permessage-deflate-decoder`, `make-websocket-permessage-deflate-frame-validator`, `websocket-permessage-deflate-extension`, `+websocket-permessage-deflate-rsv1+`, and the `websocket-permessage-deflate-*` accessors |
+| HTTP/1.1 | `serialize-http-request`, `serialize-http-request-body`, `serialize-http-response`, `parse-http-request`, `parse-http-response`, `write-http-request`, `write-http-request-body`, `write-http-response`, `read-http-request`, `read-http-response`, `http-request-reusable-p`, `http-response-reusable-p`, `serve-http-connection`, `perform-http-request` |
 | HTTP/2/3 | `make-websocket-http2-connect-headers`, `encode-websocket-http2-headers-frames`, `encode-websocket-http2-data-frames`, `encode-websocket-http2-message-data-frames`, `decode-websocket-http2-websocket-data-frames`, `make-websocket-http3-connect-headers`, `encode-websocket-http3-headers-frame`, `encode-websocket-http3-data-frames`, `encode-websocket-http3-message-data-frames`, `decode-websocket-http3-websocket-data-frames`, the matching decode/settings functions, `make-websocket-http2-connection`, `make-websocket-http3-connection`, connection start/pump/feed/stream/window/close/abort operations, QPACK instruction operations, `make-websocket-http2-session`, `make-websocket-http3-session`, and the session send/receive/close/abort operations |
 | Handshake | `websocket-accept-key`, `make-websocket-upgrade-request`, `make-websocket-origin-policy`, `websocket-upgrade-request-p`, `websocket-upgrade-response`, `websocket-client-handshake` |
-| Network | `connect-websocket`, `open-websocket-client`, `open-websocket-listener`, `accept-websocket-connection`, `serve-websocket-listener`, `close-websocket-connection`, `close-websocket-listener` |
+| Network | `connect-websocket`, `open-websocket-client`, `open-websocket-listener`, `accept-websocket-connection`, `serve-websocket-listener`, `close-websocket-connection`, `close-websocket-listener`, `websocket-send`, `websocket-receive`, `generate-websocket-key` |
 | Proxy/TLS | `make-http-connect-proxy`, `make-socks5-proxy`, `make-websocket-tls-upgrader`, `make-websocket-tls-server-wrapper` |
 | Close payloads | `websocket-valid-close-code-p`, `make-websocket-close-payload`, `parse-websocket-close-payload` |
-| Conditions | `websocket-error`, `websocket-http-error`, `websocket-timeout`, `websocket-transport-error`, `websocket-size-limit-exceeded`, `websocket-invalid-data` |
+| Conditions | `websocket-error`, `websocket-http-error`, `websocket-timeout`, `websocket-transport-error`, `websocket-protocol-error`, `websocket-flow-control-error`, `websocket-size-limit-exceeded`, `websocket-invalid-data` |
 
 `websocket-size-limit-exceeded` and `websocket-invalid-data` are subtypes of
 `websocket-error`, so a session mapping conditions to close codes can match
