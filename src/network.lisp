@@ -246,25 +246,13 @@ SOCKS5 negotiation is sent."
        (subtypep (array-element-type value) '(unsigned-byte 8))))
 
 (defun %websocket-random-octets (count)
-  (let ((result (make-array count :element-type '(unsigned-byte 8))))
-    (or
-     (ignore-errors
-       (with-open-file (stream #P"/dev/urandom"
-                               :direction :input
-                               :element-type '(unsigned-byte 8))
-         (when (= count (read-sequence result stream))
-           result)))
-     (let* ((package (or (find-package :ironclad)
-                         (ignore-errors (require :ironclad)
-                                        (find-package :ironclad))))
-            (symbol (and package (find-symbol "RANDOM-DATA" package))))
-       (when (and symbol (fboundp symbol))
-         (let ((data (funcall symbol count)))
-           (when (%websocket-byte-vector-p data)
-             data))))
-     (%websocket-network-failure
-      "No cryptographically secure random-byte source is available."
-      :random)) ))
+  (handler-case
+      (crypto-kit:random-octets count)
+    (error (condition)
+      (%websocket-network-failure
+       "The cryptographically secure random-byte source failed."
+       :random
+       :detail condition))))
 
 (defun generate-websocket-key (&optional random-function)
   "Return a fresh RFC 6455 Sec-WebSocket-Key value.
@@ -1122,22 +1110,6 @@ The stream is closed even when sending the Close frame signals an error."
                     (%websocket-network-close-stream stream))
                   t)))))))
 
-(defun %websocket-tls-package ()
-  (or (find-package :cl+ssl)
-      (progn
-        (ignore-errors (require :cl+ssl))
-        (find-package :cl+ssl))))
-
-(defun %websocket-tls-function (name)
-  (let* ((package (%websocket-tls-package))
-         (symbol (and package (find-symbol name package))))
-    (if (and symbol (fboundp symbol))
-        (symbol-function symbol)
-        (%websocket-network-failure
-         "The requested TLS operation is unavailable because cl+ssl is not loaded."
-         :tls
-         :detail name))))
-
 (defun %websocket-valid-tls-verify-p (verify)
   (member verify '(nil :optional :required) :test #'eq))
 
@@ -1159,53 +1131,23 @@ The stream is closed even when sending the Close frame signals an error."
           (and (null certificate) (null key)))))
 
 (defun make-websocket-tls-upgrader
-    (&key (verify :required) alpn-protocols certificate key password
+    (&key (verify :required) alpn-protocols trust-anchors certificate key password
           (unwrap-stream-p nil)
           (clock-function #'%websocket-monotonic-time))
-  "Return a client TLS-upgrade callback backed by cl+ssl.
+  "Return a client TLS-upgrade callback backed by cl-http-kit TLS.
 
 The callback receives a binary STREAM and HTTP URI, and accepts TIMEOUT and
 DEADLINE keyword arguments. VERIFY may be NIL, :OPTIONAL, or :REQUIRED.
 Custom TLS callbacks may return the selected ALPN protocol as a second value."
-  (unless (%websocket-valid-tls-verify-p verify)
-    (%websocket-protocol-error
-     "TLS VERIFY must be NIL, :OPTIONAL, or :REQUIRED."
-     verify))
-  (unless (%websocket-valid-alpn-protocols-p alpn-protocols)
-    (%websocket-protocol-error
-     "TLS ALPN protocol names must contain 1 to 255 ASCII characters."
-     alpn-protocols))
-  (unless (%websocket-valid-certificate-pair-p certificate key nil)
-    (%websocket-protocol-error
-     "TLS client certificates require both CERTIFICATE and KEY."
-     (list :certificate certificate :key key)))
-  (unless (functionp clock-function)
-    (%websocket-protocol-error
-     "TLS CLOCK-FUNCTION must be callable."
-     clock-function))
-  (let ((make-client-stream (%websocket-tls-function "MAKE-SSL-CLIENT-STREAM")))
-    (lambda (stream uri &key timeout deadline &allow-other-keys)
-      (unless (streamp stream)
-        (%websocket-protocol-error
-         "TLS upgrade requires a Lisp stream."
-         stream))
-      (let* ((http-uri (%websocket-network-uri uri))
-             (effective-deadline
-               (%websocket-effective-deadline
-                timeout deadline clock-function)))
-        (%websocket-call-with-deadline
-         (lambda ()
-           (funcall make-client-stream
-                    stream
-                    :unwrap-stream-p unwrap-stream-p
-                    :hostname (http-uri-host http-uri)
-                    :external-format nil
-                    :verify verify
-                    :alpn-protocols alpn-protocols
-                    :certificate certificate
-                    :key key
-                    :password password))
-         effective-deadline clock-function :tls)))))
+  (http-kit/tls:make-http-tls-upgrader
+   :verify verify
+   :alpn-protocols alpn-protocols
+   :trust-anchors trust-anchors
+   :certificate certificate
+   :key key
+   :password password
+   :unwrap-stream-p unwrap-stream-p
+   :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
     (&key certificate key password (alpn-protocols '("http/1.1"))
@@ -1214,48 +1156,14 @@ Custom TLS callbacks may return the selected ALPN protocol as a second value."
   "Return a server callback that upgrades an accepted stream to TLS.
 
 CERTIFICATE and KEY are required because a server cannot complete a TLS
-handshake without an identity. The callback returns the selected ALPN
-protocol as a second value when cl+ssl reports one."
-  (unless (%websocket-valid-certificate-pair-p certificate key t)
-    (%websocket-protocol-error
-     "TLS server certificates require both CERTIFICATE and KEY."
-     (list :certificate certificate :key key)))
-  (unless (%websocket-valid-alpn-protocols-p alpn-protocols)
-    (%websocket-protocol-error
-     "TLS ALPN-PROTOCOLS must be a list of non-empty ASCII protocol names."
-     alpn-protocols))
-  (when (and alpn-protocols
-             (not (member "http/1.1" alpn-protocols :test #'string=)))
-    (%websocket-protocol-error
-     "TLS server ALPN-PROTOCOLS must include HTTP/1.1."
-     alpn-protocols))
-  (unless (functionp clock-function)
-    (%websocket-protocol-error
-     "TLS CLOCK-FUNCTION must be callable."
-     clock-function))
-  (let ((make-server-stream (%websocket-tls-function "MAKE-SSL-SERVER-STREAM")))
-    (lambda (stream &key timeout deadline &allow-other-keys)
-      (unless (streamp stream)
-        (%websocket-protocol-error
-         "TLS upgrade requires a Lisp stream."
-         stream))
-      (let ((effective-deadline
-              (%websocket-effective-deadline
-               timeout deadline clock-function)))
-        (let ((tls-stream
-                (%websocket-call-with-deadline
-                 (lambda ()
-                   (funcall make-server-stream
-                            stream
-                            :unwrap-stream-p unwrap-stream-p
-                            :external-format nil
-                            :alpn-protocols alpn-protocols
-                            :certificate certificate
-                            :key key
-                            :password password))
-                 effective-deadline clock-function :tls)))
-          (values tls-stream
-                  (websocket-tls-selected-alpn-protocol tls-stream)))))))
+handshake without an identity."
+  (declare (ignore alpn-protocols))
+  (http-kit/tls:make-http-tls-server-wrapper
+   :certificate certificate
+   :key key
+   :password password
+   :unwrap-stream-p unwrap-stream-p
+   :clock-function clock-function))
 
 (defun websocket-tls-selected-alpn-protocol (stream)
   "Return the ALPN protocol selected on STREAM, or NIL when unavailable."
@@ -1263,8 +1171,7 @@ protocol as a second value when cl+ssl reports one."
     (%websocket-protocol-error
      "TLS ALPN lookup requires a Lisp stream."
      stream))
-  (let ((function (%websocket-tls-function "GET-SELECTED-ALPN-PROTOCOL")))
-    (funcall function stream)))
+  (http-kit/tls:http-tls-selected-alpn-protocol stream))
 
 (defun %websocket-network-apply-tls
     (stream uri tls-upgrader deadline clock-function)
@@ -1325,6 +1232,7 @@ protocol as a second value when cl+ssl reports one."
          max-body-bytes
          tls-upgrader (tls-verify :required)
          (tls-alpn-protocols '("http/1.1"))
+         tls-trust-anchors
          tls-certificate tls-key tls-password
          (local-mask-p t) (peer-mask-required-p t)
          payload-encoder payload-decoder (payload-reserved-bits 0)
@@ -1443,6 +1351,7 @@ negotiation; selected extension names must still have been offered."
                         (make-websocket-tls-upgrader
                          :verify tls-verify
                          :alpn-protocols tls-alpn-protocols
+                         :trust-anchors tls-trust-anchors
                          :certificate tls-certificate
                          :key tls-key
                          :password tls-password

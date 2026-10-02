@@ -89,86 +89,6 @@
       (replace copy result)
       copy)))
 
-(defun %websocket-rol32 (value count)
-  (logand #xffffffff
-          (logior (ash value count)
-                  (ash value (- count 32)))))
-
-(defun %websocket-sha1 (octets)
-  (let* ((length (length octets))
-         (with-one (1+ length))
-         (zero-count (mod (- 56 (mod with-one 64)) 64))
-         (padded-length (+ with-one zero-count 8))
-         (padded (make-array padded-length
-                             :element-type '(unsigned-byte 8)))
-         (h0 #x67452301)
-         (h1 #xefcdab89)
-         (h2 #x98badcfe)
-         (h3 #x10325476)
-         (h4 #xc3d2e1f0))
-    (replace padded octets)
-    (setf (aref padded length) #x80)
-    (%websocket-store-integer padded (- padded-length 8) 8 (* 8 length))
-    (loop for block-start from 0 below padded-length by 64
-          with words = (make-array 80 :element-type '(unsigned-byte 32))
-          do (loop for index below 16
-                   do (setf (aref words index)
-                            (%websocket-read-integer padded
-                                                     (+ block-start (* index 4))
-                                                     4)))
-             (loop for index from 16 below 80
-                   do (setf (aref words index)
-                            (%websocket-rol32
-                             (logxor (aref words (- index 3))
-                                     (aref words (- index 8))
-                                     (aref words (- index 14))
-                                     (aref words (- index 16)))
-                             1)))
-             (let ((a h0)
-                   (b h1)
-                   (c h2)
-                   (d h3)
-                   (e h4))
-               (loop for index below 80
-                     for function = (cond ((< index 20)
-                                           (logior (logand b c)
-                                                   (logand (lognot b) d)))
-                                          ((< index 40)
-                                           (logxor b c d))
-                                          ((< index 60)
-                                           (logior (logand b c)
-                                                   (logand b d)
-                                                   (logand c d)))
-                                          (t (logxor b c d)))
-                     for constant = (cond ((< index 20) #x5a827999)
-                                          ((< index 40) #x6ed9eba1)
-                                          ((< index 60) #x8f1bbcdc)
-                                          (t #xca62c1d6))
-                     for temporary =
-                       (logand #xffffffff
-                               (+ (%websocket-rol32 a 5)
-                                  function
-                                  e
-                                  constant
-                                  (aref words index)))
-                     do (setf e d
-                              d c
-                              c (%websocket-rol32 b 30)
-                              b a
-                              a temporary))
-               (setf h0 (logand #xffffffff (+ h0 a))
-                     h1 (logand #xffffffff (+ h1 b))
-                     h2 (logand #xffffffff (+ h2 c))
-                     h3 (logand #xffffffff (+ h3 d))
-                     h4 (logand #xffffffff (+ h4 e)))))
-    (let ((digest (make-array 20 :element-type '(unsigned-byte 8))))
-      (%websocket-store-integer digest 0 4 h0)
-      (%websocket-store-integer digest 4 4 h1)
-      (%websocket-store-integer digest 8 4 h2)
-      (%websocket-store-integer digest 12 4 h3)
-      (%websocket-store-integer digest 16 4 h4)
-      digest)))
-
 (defun websocket-accept-key (sec-websocket-key)
   "Return the RFC 6455 Sec-WebSocket-Accept value for a client key."
   (unless (stringp sec-websocket-key)
@@ -185,7 +105,8 @@
        "Sec-WebSocket-Key must decode to exactly 16 octets."
        (length decoded)))
     (%websocket-base64-encode
-     (%websocket-sha1
+     (crypto-kit:digest
+      :sha1
       (let* ((key (%websocket-utf8-octets sec-websocket-key))
              (guid (%websocket-utf8-octets +websocket-close-guid+))
              (input (make-array (+ (length key) (length guid))

@@ -7,15 +7,16 @@ and HTTP/3 network transport layer: frame encoding and decoding, masking,
 fragmentation, control frames, close codes, UTF-8 validation, bounded message
 assembly, the permessage-deflate extension, the HTTP Upgrade handshake,
 persistent HTTP/1.1 connections, HTTP/2 and HTTP/3 extended CONNECT
-bootstrapping, TCP client/listener lifecycle, optional TLS, and HTTP
+bootstrapping, TCP client/listener lifecycle, TLS client support, and HTTP
 CONNECT/SOCKS5 proxy traversal.
 
 It uses
 [cl-http-message-kit](https://github.com/nerima-lisp/cl-http-message-kit) for
 HTTP request and response values and `cl-http-kit/http2` plus
 `cl-http-kit/http3` for the HTTP/2 and HTTP/3 header and frame codecs. Native
-TCP and DNS support is provided on SBCL. TLS is optional and loaded through
-`cl+ssl` when that system is installed.
+TCP and DNS support is provided on SBCL. TLS client connections use the
+pure-Lisp `cl-tls-kit` integration exposed by `cl-http-kit/tls`, with
+certificate verification required by default.
 
 ## Install
 
@@ -186,7 +187,7 @@ before enabling the matching RSV bit.
 | HTTP/2/3 | `make-websocket-http2-connect-headers`, `encode-websocket-http2-headers-frames`, `encode-websocket-http2-data-frames`, `encode-websocket-http2-message-data-frames`, `decode-websocket-http2-websocket-data-frames`, `make-websocket-http3-connect-headers`, `encode-websocket-http3-headers-frame`, `encode-websocket-http3-data-frames`, `encode-websocket-http3-message-data-frames`, `decode-websocket-http3-websocket-data-frames`, the matching decode/settings functions, `make-websocket-http2-connection`, `make-websocket-http3-connection`, connection start/pump/feed/stream/window/close/abort operations, QPACK instruction operations, `make-websocket-http2-session`, `make-websocket-http3-session`, and the session send/receive/close/abort operations |
 | Handshake | `websocket-accept-key`, `make-websocket-upgrade-request`, `make-websocket-origin-policy`, `websocket-upgrade-request-p`, `websocket-upgrade-response`, `websocket-client-handshake` |
 | Network | `connect-websocket`, `open-websocket-client`, `open-websocket-listener`, `accept-websocket-connection`, `serve-websocket-listener`, `close-websocket-connection`, `close-websocket-listener`, `websocket-send`, `websocket-receive`, `generate-websocket-key` |
-| Proxy/TLS | `make-http-connect-proxy`, `make-socks5-proxy`, `make-websocket-tls-upgrader`, `make-websocket-tls-server-wrapper` |
+| Proxy/TLS | `make-http-connect-proxy`, `make-socks5-proxy`, `make-websocket-tls-upgrader`, `make-websocket-tls-server-wrapper`, `websocket-tls-selected-alpn-protocol` |
 | Close payloads | `websocket-valid-close-code-p`, `make-websocket-close-payload`, `parse-websocket-close-payload` |
 | Conditions | `websocket-error`, `websocket-http-error`, `websocket-timeout`, `websocket-transport-error`, `websocket-protocol-error`, `websocket-flow-control-error`, `websocket-size-limit-exceeded`, `websocket-invalid-data` |
 

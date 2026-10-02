@@ -368,7 +368,7 @@
                     "Trailer"
                     "Transfer-Encoding"
                     "Upgrade"))
-      (signals websocket-http-error
+      (signals http-invalid-header
         (serialize-http-request
          (make-http-request
           :method "POST"
