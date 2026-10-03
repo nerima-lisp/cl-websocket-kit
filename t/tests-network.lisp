@@ -367,8 +367,8 @@
                  for frame =
                    (read-websocket-frame
                     (websocket-connection-stream accepted)
-                    :require-mask-p t
-                    :allow-unmasked-p nil)
+                    :require-mask-p nil
+                    :allow-unmasked-p t)
                  do (progn
                       (push (websocket-frame-mask-p frame) received-masks)
                       (case (websocket-frame-opcode frame)
