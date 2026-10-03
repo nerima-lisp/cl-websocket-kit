@@ -488,4 +488,4 @@
               (ignore-errors (uiop:terminate-process socat-process))
               (ignore-errors (uiop:wait-process socat-process)))
             (ignore-errors (delete-file certificate))
-            (ignore-errors (delete-file key)))))))))
+            (ignore-errors (delete-file key))))))))
