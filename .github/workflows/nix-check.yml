@@ -6,13 +6,7 @@ on:
 
 jobs:
   nix-flake-check:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-          - os: ubuntu-24.04
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v20
