@@ -394,7 +394,7 @@
                           :payload
                           (websocket-frame-payload frame))
                          (return))))
-            (close-websocket-connection accepted :send-close-p nil))))
+            (close-websocket-connection accepted :send-close-p nil)))
         (values nil received received-masks)
       (error (condition)
         (values condition nil nil))))
