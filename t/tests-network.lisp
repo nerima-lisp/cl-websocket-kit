@@ -397,7 +397,7 @@
             (close-websocket-connection accepted :send-close-p nil)))
         (values nil received received-masks)
       (error (condition)
-        (values condition nil nil))))
+        (values condition nil nil)))))
 
   (describe "wss TLS loopback E2E"
     (it "does a verified TLS WebSocket session through socat"
