@@ -144,7 +144,9 @@
               tlsKit
               pkgs.sbcl
               pkgs.coreutils
+              pkgs.openssl
               pkgs.perl
+              pkgs.socat
             ];
           };
         }
@@ -182,6 +184,8 @@
               cryptoKit
               deflateKit
               tlsKit
+              pkgs.openssl
+              pkgs.socat
             ];
             text = ''
               export CL_SOURCE_REGISTRY="$PWD:${sourceRegistry}"
@@ -239,6 +243,8 @@
               cryptoKit
               deflateKit
               tlsKit
+              pkgs.openssl
+              pkgs.socat
             ];
             dontConfigure = true;
             dontBuild = true;

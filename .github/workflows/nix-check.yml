@@ -1,0 +1,19 @@
+name: Nix checks
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  nix-flake-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+          - os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v20
+      - run: nix flake check
