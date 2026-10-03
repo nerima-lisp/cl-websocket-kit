@@ -395,8 +395,9 @@
                           (websocket-frame-payload frame))
                          (return))))
             (close-websocket-connection accepted :send-close-p nil))))
+        (values nil received received-masks)
       (error (condition)
-        condition)))
+        (values condition nil nil))))
 
   (describe "wss TLS loopback E2E"
     (it "does a verified TLS WebSocket session through socat"
@@ -408,6 +409,7 @@
               (socat-process nil)
               (server-thread nil)
               (server-error nil)
+              (server-result nil)
               (received nil)
               (received-masks nil)
               (connection nil))
@@ -425,9 +427,10 @@
                    (setf server-thread
                          (sb-thread:make-thread
                           (lambda ()
-                            (setf server-error
-                                  (%wss-e2e-serve-plain
-                                   plain-listener received received-masks)))))
+                            (setf server-result
+                                  (multiple-value-list
+                                   (%wss-e2e-serve-plain
+                                    plain-listener received received-masks))))))
                    (setf socat-process
                          (%wss-e2e-start-socat
                           tls-port certificate key plain-port))
@@ -461,6 +464,9 @@
                    (setf connection nil)
                    (sb-thread:join-thread server-thread)
                    (setf server-thread nil)
+                   (setf server-error (first server-result)
+                         received (second server-result)
+                         received-masks (third server-result))
                    (expect server-error :to-be nil)
                    (expect (nreverse received)
                            :to-equalp
