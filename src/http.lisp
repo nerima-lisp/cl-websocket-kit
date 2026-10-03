@@ -363,9 +363,14 @@
                       (t :length))
                 declared-length)))))
 
+(defun %websocket-http-wire-header-name (name)
+  (string-capitalize name))
+
 (defun %websocket-http-append-headers (builder headers)
   (dolist (pair headers)
-    (%websocket-http-builder-append-string builder (car pair))
+    (%websocket-http-builder-append-string
+     builder
+     (%websocket-http-wire-header-name (car pair)))
     (%websocket-http-builder-append-string builder ": ")
     (%websocket-http-builder-append-string builder (cdr pair))
     (%websocket-http-builder-append-string builder (string #\Return))
@@ -392,7 +397,9 @@
       builder
       (format nil "0~C~C" #\Return #\Newline))
      (dolist (pair trailers)
-       (%websocket-http-builder-append-string builder (car pair))
+       (%websocket-http-builder-append-string
+        builder
+        (%websocket-http-wire-header-name (car pair)))
        (%websocket-http-builder-append-string builder ": ")
        (%websocket-http-builder-append-string builder (cdr pair))
        (%websocket-http-builder-append-string

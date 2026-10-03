@@ -47,13 +47,7 @@
     (%websocket-http2-3-fail
      "An HTTP/2 or HTTP/3 pseudo-header requires a colon-prefixed name and string value."
      :detail (list name content)))
-  ;; cl-http-message-kit deliberately rejects pseudo-header names in its
-  ;; public constructor, while HPACK/QPACK still use the same header value
-  ;; object.  Construct the validated representation after applying this
-  ;; protocol's stricter pseudo-header checks.
-  (http-message-kit::%make-http-header
-   :name name
-   :content content))
+  (make-http-header name content :pseudo-p t))
 
 (defun %websocket-http2-3-octet-vector-p (octets)
   (and (vectorp octets)
@@ -1161,8 +1155,13 @@
       (%websocket-http2-3-fail
        "An HTTP/3 CONNECT settings input must be a SETTINGS frame."))
     (let ((settings
-            (http-kit/http3:decode-http3-settings
-             (http-kit/http3:make-http3-frame :type type :payload payload))))
+            (handler-case
+                (http-kit/http3:decode-http3-settings
+                 (http-kit/http3:make-http3-frame :type type :payload payload))
+              (http-kit:http-protocol-error (condition)
+                (%websocket-http2-3-fail
+                 "The HTTP/3 SETTINGS payload is invalid."
+                 :detail condition)))))
       (%websocket-http2-3-validate-http3-setting-identifiers settings)
       (let ((entry (assoc +websocket-http3-enable-connect-protocol-setting+
                           settings)))

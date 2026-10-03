@@ -1,0 +1,13 @@
+name: Nix checks
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  nix-flake-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v20
+      - run: nix flake check --print-build-logs

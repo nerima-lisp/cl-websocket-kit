@@ -1,5 +1,8 @@
 (defpackage #:websocket-kit/test
   (:use #:cl #:websocket-kit #:http-message-kit)
+  (:shadowing-import-from #:websocket-kit
+                          #:http-pseudo-header-p
+                          #:make-http-pseudo-header)
   (:shadowing-import-from #:cl-weave
                           #:describe)
   (:import-from #:cl-weave
