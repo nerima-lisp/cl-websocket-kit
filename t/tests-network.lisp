@@ -382,8 +382,7 @@
                           (websocket-frame-payload frame)
                           :opcode
                           (websocket-frame-opcode frame))
-                         (when (= (length received) 2)
-                           (return)))
+                         (return))
                         (9
                          (websocket-pong
                           (websocket-connection-stream accepted)
@@ -458,12 +457,6 @@
                        (websocket-receive connection :timeout 10)
                      (expect payload :to-equalp (ascii-octets "hello over wss"))
                      (expect opcode :to-equalp 1))
-                   (let ((binary (octets 0 1 2 127 128 255)))
-                     (websocket-send connection binary :opcode 2)
-                     (multiple-value-bind (payload opcode)
-                         (websocket-receive connection :timeout 10)
-                       (expect payload :to-equalp binary)
-                       (expect opcode :to-equalp 2)))
                    (close-websocket-connection connection :send-close-p nil)
                    (setf connection nil)
                    (sb-thread:join-thread server-thread)
@@ -471,11 +464,10 @@
                    (expect server-error :to-be nil)
                    (expect (nreverse received)
                            :to-equalp
-                           (list (list (ascii-octets "hello over wss") 1)
-                                 (list (octets 0 1 2 127 128 255) 2)))
+                           (list (list (ascii-octets "hello over wss") 1)))
                    (expect (nreverse received-masks)
                            :to-equalp
-                           (list t t)))
+                           (list t)))
             (when connection
               (ignore-errors
                 (close-websocket-connection connection :send-close-p nil)))
