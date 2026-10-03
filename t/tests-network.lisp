@@ -436,6 +436,7 @@
                           (format nil "wss://127.0.0.1:~D/socket" tls-port)
                           :timeout 10
                           :local-mask-p t
+                          :peer-mask-required-p nil
                           :tls-upgrader (%wss-e2e-tls-upgrader trust-anchor)))
                    (let* ((request (websocket-connection-request connection))
                           (response (websocket-connection-response connection))
