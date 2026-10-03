@@ -188,6 +188,7 @@
               pkgs.socat
             ];
             text = ''
+              export SBCL_HOME="${pkgs.sbcl}/lib/sbcl"
               export CL_SOURCE_REGISTRY="$PWD:${sourceRegistry}"
               cl-weave run --load "$PWD/cl-websocket-kit.asd" \
                 cl-websocket-kit/test --reporter spec --max-workers 1 \
@@ -253,6 +254,7 @@
               export HOME="$TMPDIR/home"
               export XDG_CACHE_HOME="$TMPDIR/cache"
               mkdir -p "$HOME" "$XDG_CACHE_HOME"
+              export SBCL_HOME="${pkgs.sbcl}/lib/sbcl"
               export CL_SOURCE_REGISTRY="$PWD:${sourceRegistry}"
               cl-weave run --load "$PWD/cl-websocket-kit.asd" \
                 cl-websocket-kit/test --reporter spec --max-workers 1 \
