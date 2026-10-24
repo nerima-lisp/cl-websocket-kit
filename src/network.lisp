@@ -346,6 +346,32 @@ must return a one-dimensional unsigned-byte vector."
                (websocket-proxy-port proxy))
    :path "/"))
 
+(defun %websocket-network-http-proxy (proxy)
+  (http-kit/client:make-http-proxy
+   :scheme
+   (case (websocket-proxy-type proxy)
+     (:http-connect
+      (if (websocket-proxy-tls-upgrader proxy) :https :http))
+     (:socks5 :socks5))
+   :host (websocket-proxy-host proxy)
+   :port (websocket-proxy-port proxy)
+   :username (or (websocket-proxy-username proxy)
+                 (and (websocket-proxy-password proxy) ""))
+   :password (websocket-proxy-password proxy)))
+
+(defun %websocket-network-proxy-plan (proxy uri host port)
+  (let* ((http-proxy (%websocket-network-http-proxy proxy))
+         (shaped-uri
+           (make-http-uri
+            :scheme "https"
+            :authority (%websocket-network-authority host port)
+            :path (http-uri-path uri)
+            :query (http-uri-query uri)))
+         (plan (http-kit/client:http-proxy-plan http-proxy shaped-uri)))
+    ;; The explicit port survives for ws:// while the target scheme controls TLS.
+    (setf (getf plan :target) uri)
+    plan))
+
 (defun %websocket-network-octets (string)
   (%websocket-utf8-octets string))
 
@@ -509,64 +535,9 @@ must return a one-dimensional unsigned-byte vector."
             (%websocket-with-cleanup
               (sb-bsd-sockets:socket-close accepted)))))))
 
-  (defun %websocket-native-connect
-      (host port deadline clock-function)
-    (let ((last-condition nil))
-      (dolist (entry (%websocket-native-address-entries
-                      host deadline clock-function))
-        (let* ((type (first entry))
-               (address (second entry))
-               (socket nil)
-               (stream nil)
-               (retained-p nil))
-          (unwind-protect
-               (handler-case
-                   (progn
-                     (setf socket
-                           (make-instance (%websocket-native-socket-class type)
-                                          :type :stream
-                                          :protocol :tcp))
-                     (%websocket-call-with-deadline
-                      (lambda ()
-                        (sb-bsd-sockets:socket-connect socket address port))
-                      deadline clock-function :connect)
-                     (setf stream
-                           (sb-bsd-sockets:socket-make-stream
-                            socket
-                            :input t
-                            :output t
-                            :element-type '(unsigned-byte 8)
-                            :buffering :full))
-                     (setf retained-p t)
-                     (return-from %websocket-native-connect
-                       (values stream
-                               (%websocket-native-address-text type address)
-                               port)))
-                 (websocket-timeout (condition)
-                   (error condition))
-                 (websocket-error (condition)
-                   (setf last-condition condition))
-                 (error (condition)
-                   (setf last-condition condition)))
-            (unless retained-p
-              (when stream
-                (%websocket-with-cleanup
-                  (close stream :abort t)))
-              (when socket
-                (%websocket-with-cleanup
-                  (sb-bsd-sockets:socket-close socket)))))))
-      (%websocket-network-failure
-       "The TCP connection could not be opened."
-       :connect
-       :detail host
-       :cause last-condition)))
 
-  (defun %websocket-native-resolve-host (host)
-    (mapcar (lambda (entry)
-              (destructuring-bind (type address) entry
-                (list (%websocket-native-address-family type)
-                      (%websocket-native-address-text type address))))
-            (%websocket-native-address-entries host)))
+
+
 
   (defun %websocket-native-close-listener (socket)
     (sb-bsd-sockets:socket-close socket)))
@@ -586,18 +557,9 @@ must return a one-dimensional unsigned-byte vector."
      "Native TCP transport is not implemented on this Lisp implementation."
      :accept))
 
-  (defun %websocket-native-connect
-      (host port deadline clock-function)
-    (declare (ignore host port deadline clock-function))
-    (%websocket-network-failure
-     "Native TCP transport is not implemented on this Lisp implementation."
-     :connect))
 
-  (defun %websocket-native-resolve-host (host)
-    (declare (ignore host))
-    (%websocket-network-failure
-     "Native DNS resolution is not implemented on this Lisp implementation."
-     :resolve))
+
+
 
   (defun %websocket-native-close-listener (socket)
     (declare (ignore socket))
@@ -654,30 +616,8 @@ must return a one-dimensional unsigned-byte vector."
 (defun %websocket-network-close-stream (stream)
   (when stream
     (%websocket-with-cleanup
-      (close stream :abort t)))
+      (http-kit/network:close-http-tcp-stream stream)))
   nil)
-
-(defun %websocket-network-header-name-equal-p (header name)
-  (and (http-header-p header)
-       (string-equal (http-header-name header) name)))
-
-(defun %websocket-network-proxy-header-allowed-p (header)
-  (not (some (lambda (name)
-               (%websocket-network-header-name-equal-p header name))
-             '("Host" "Proxy-Authorization" "Content-Length"
-               "Transfer-Encoding" "Connection"))))
-
-(defun %websocket-network-proxy-authorization (proxy)
-  (when (or (websocket-proxy-username proxy)
-            (websocket-proxy-password proxy))
-    (let ((credentials
-            (%websocket-network-octets
-             (format nil "~A:~A"
-                     (or (websocket-proxy-username proxy) "")
-                     (or (websocket-proxy-password proxy) "")))))
-      (make-http-header
-       "Proxy-Authorization"
-       (format nil "Basic ~A" (%websocket-base64-encode credentials))))))
 
 (defparameter +websocket-max-informational-responses+ 16)
 
@@ -707,52 +647,6 @@ must return a one-dimensional unsigned-byte vector."
                         :operation :response)
                        nil)
                    (return (values response consumed-total)))))))
-
-(defun %websocket-network-http-connect
-    (stream proxy target-host target-port deadline clock-function
-            &key max-header-bytes max-fields max-body-bytes)
-  (let ((extra-headers (websocket-proxy-headers proxy)))
-    (dolist (header extra-headers)
-      (unless (%websocket-network-proxy-header-allowed-p header)
-        (%websocket-protocol-error
-         "HTTP proxy headers may not override CONNECT framing headers."
-         (http-header-name header))))
-    (let* ((authority (%websocket-network-authority target-host target-port))
-           (request
-             (make-http-request
-              :method "CONNECT"
-              :uri (parse-http-uri (format nil "http://~A/" authority))
-              :request-target authority
-              :headers
-              (append
-               (list (make-http-header "Host" authority))
-               (when (%websocket-network-proxy-authorization proxy)
-                 (list (%websocket-network-proxy-authorization proxy)))
-               extra-headers)
-              :body (make-array 0 :element-type '(unsigned-byte 8)))))
-      (%websocket-call-with-deadline
-       (lambda () (write-http-request request stream))
-       deadline clock-function :proxy-connect-write)
-      (let ((response
-              (%websocket-call-with-deadline
-               (lambda ()
-                 (%websocket-network-read-final-http-response
-                  stream request
-                  :deadline deadline
-                  :max-header-bytes max-header-bytes
-                  :max-fields max-fields
-                  :max-body-bytes max-body-bytes
-                  :clock-function clock-function))
-               deadline clock-function :proxy-connect-read)))
-        (unless (and (http-response-p response)
-                     (<= 200 (http-response-status response) 299))
-          (%websocket-network-failure
-           "The HTTP CONNECT proxy rejected the tunnel request."
-           :proxy-connect
-           :detail (and (http-response-p response)
-                        (http-response-status response))
-           :cause response)))))
-  stream)
 
 (defun %websocket-network-connection-open-p (connection)
   (unless (websocket-connection-p connection)
@@ -1162,7 +1056,7 @@ The stream is closed even when sending the Close frame signals an error."
     (&key (verify :required) alpn-protocols certificate key password
           (unwrap-stream-p nil)
           (clock-function #'%websocket-monotonic-time))
-  "Return a client TLS-upgrade callback backed by cl+ssl.
+  "Return a client TLS-upgrade callback backed by cl-http-kit.
 
 The callback receives a binary STREAM and HTTP URI, and accepts TIMEOUT and
 DEADLINE keyword arguments. VERIFY may be NIL, :OPTIONAL, or :REQUIRED.
@@ -1179,33 +1073,26 @@ Custom TLS callbacks may return the selected ALPN protocol as a second value."
     (%websocket-protocol-error
      "TLS client certificates require both CERTIFICATE and KEY."
      (list :certificate certificate :key key)))
+  (when (or certificate key)
+    (%websocket-network-failure
+     "TLS client certificate authentication is not supported by cl-http-kit."
+     :tls :detail :tls-client-certificate-auth))
+  (when password
+    (%websocket-network-failure
+     "TLS passwords are not supported by cl-http-kit."
+     :tls :detail :tls-password))
+  (when unwrap-stream-p
+    (%websocket-network-failure
+     "TLS stream unwrapping is not supported by cl-http-kit."
+     :tls :detail :tls-stream-unwrapping))
   (unless (functionp clock-function)
     (%websocket-protocol-error
      "TLS CLOCK-FUNCTION must be callable."
      clock-function))
-  (let ((make-client-stream (%websocket-tls-function "MAKE-SSL-CLIENT-STREAM")))
-    (lambda (stream uri &key timeout deadline &allow-other-keys)
-      (unless (streamp stream)
-        (%websocket-protocol-error
-         "TLS upgrade requires a Lisp stream."
-         stream))
-      (let* ((http-uri (%websocket-network-uri uri))
-             (effective-deadline
-               (%websocket-effective-deadline
-                timeout deadline clock-function)))
-        (%websocket-call-with-deadline
-         (lambda ()
-           (funcall make-client-stream
-                    stream
-                    :unwrap-stream-p unwrap-stream-p
-                    :hostname (http-uri-host http-uri)
-                    :external-format nil
-                    :verify verify
-                    :alpn-protocols alpn-protocols
-                    :certificate certificate
-                    :key key
-                    :password password))
-         effective-deadline clock-function :tls)))))
+  (http-kit/tls:make-http-tls-upgrader
+   :verify verify
+   :alpn-protocols alpn-protocols
+   :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
     (&key certificate key password (alpn-protocols '("http/1.1"))
@@ -1257,14 +1144,67 @@ protocol as a second value when cl+ssl reports one."
           (values tls-stream
                   (websocket-tls-selected-alpn-protocol tls-stream)))))))
 
+(defun %websocket-network-proxy-open-stream
+    (raw-opener websocket-proxy raw-stream-pair deadline clock-function)
+  (lambda (request &key timeout deadline proxy-plan proxy &allow-other-keys)
+    (let ((opened (funcall raw-opener request
+                           :timeout timeout
+                           :deadline deadline
+                           :proxy-plan proxy-plan
+                           :proxy proxy)))
+      (setf (car raw-stream-pair) opened)
+      (if (and websocket-proxy
+               (eq (websocket-proxy-type websocket-proxy) :socks5)
+               (websocket-proxy-tls-upgrader websocket-proxy))
+          (handler-case
+              (multiple-value-bind (upgraded selected-alpn)
+                  (%websocket-network-apply-tls
+                   opened
+                   (%websocket-network-proxy-uri websocket-proxy)
+                   (websocket-proxy-tls-upgrader websocket-proxy)
+                   deadline clock-function)
+                (declare (ignore selected-alpn))
+                upgraded)
+            (error (condition)
+              (%websocket-network-close-stream-pair
+               opened (car raw-stream-pair))
+              (error condition)))
+          opened))))
+
+(defun %websocket-network-proxy-close-stream (stream raw-stream-pair)
+  (%websocket-network-close-stream-pair stream (car raw-stream-pair)))
+
 (defun websocket-tls-selected-alpn-protocol (stream)
   "Return the ALPN protocol selected on STREAM, or NIL when unavailable."
   (unless (streamp stream)
     (%websocket-protocol-error
-     "TLS ALPN lookup requires a Lisp stream."
-     stream))
-  (let ((function (%websocket-tls-function "GET-SELECTED-ALPN-PROTOCOL")))
-    (funcall function stream)))
+     "TLS ALPN lookup requires a Lisp stream." stream))
+  (handler-case
+      (http-kit/tls:http-tls-selected-alpn-protocol stream)
+    (http-kit:http-unsupported-feature ()
+      (funcall (%websocket-tls-function "GET-SELECTED-ALPN-PROTOCOL")
+               stream))))
+
+(defun %websocket-network-client-tls-upgrader
+    (proxy origin-tls-upgrader deadline clock-function)
+  (let ((proxy-upgrader-pending
+          (and proxy
+               (eq (websocket-proxy-type proxy) :http-connect)
+               (websocket-proxy-tls-upgrader proxy))))
+    (when (or origin-tls-upgrader proxy-upgrader-pending)
+      (lambda (stream uri &key &allow-other-keys)
+        (let ((upgrader
+                (if proxy-upgrader-pending
+                    (prog1 proxy-upgrader-pending
+                      (setf proxy-upgrader-pending nil))
+                    origin-tls-upgrader)))
+          (unless upgrader
+            (%websocket-network-failure
+             "No TLS upgrader is available for the requested layer."
+             :tls
+             :detail uri))
+          (%websocket-network-apply-tls
+           stream uri upgrader deadline clock-function))))))
 
 (defun %websocket-network-apply-tls
     (stream uri tls-upgrader deadline clock-function)
@@ -1319,61 +1259,49 @@ protocol as a second value when cl+ssl reports one."
 
 (defun connect-websocket
     (uri &key protocols extensions headers proxy key random-function
-         extension-selection-policy
-         timeout deadline max-header-bytes
-         (max-fields +websocket-default-max-header-fields+)
-         max-body-bytes
+         extension-selection-policy timeout deadline max-header-bytes
+         (max-fields +websocket-default-max-header-fields+) max-body-bytes
          tls-upgrader (tls-verify :required)
          (tls-alpn-protocols '("http/1.1"))
          tls-certificate tls-key tls-password
          (local-mask-p t) (peer-mask-required-p t)
          payload-encoder payload-decoder (payload-reserved-bits 0)
          (clock-function #'%websocket-monotonic-time))
-  "Open a TCP or TLS WebSocket client connection for URI.
-
-PROXY may be an HTTP CONNECT or SOCKS5 configuration. The returned
-WEBSOCKET-CONNECTION owns its stream; use CLOSE-WEBSOCKET-CONNECTION when the
-session ends. Client data frames are masked by default and peer frames are
-required to be masked by default. PAYLOAD-ENCODER and PAYLOAD-DECODER may be
-used for a negotiated extension transformation; PAYLOAD-RESERVED-BITS enables
-the corresponding RSV bits on outgoing messages and as the default receive
-permission. EXTENSION-SELECTION-POLICY may implement extension parameter
-negotiation; selected extension names must still have been offered."
+  "Open a TCP or TLS WebSocket client connection for URI."
   (let* ((clock (%websocket-network-clock clock-function))
          (input-uri (%websocket-network-uri uri))
          (secure-p (member (string-downcase (%websocket-uri-scheme uri))
                            '("https" "wss") :test #'string=))
-         (host (%websocket-network-validate-host
-                (http-uri-host input-uri)))
+         (host (%websocket-network-validate-host (http-uri-host input-uri)))
          (port (%websocket-network-validate-port
                 (%websocket-network-port input-uri)))
          (effective-deadline
            (%websocket-effective-deadline timeout deadline clock))
-         (request nil)
-         (stream nil)
-         (raw-stream nil)
+         (request nil) (stream nil) (raw-stream-pair (list nil))
          (retained-p nil))
     (unless (or (null protocols) (listp protocols))
       (%websocket-protocol-error
-       "WebSocket PROTOCOLS must be a list or NIL."
-       protocols))
+       "WebSocket PROTOCOLS must be a list or NIL." protocols))
     (unless (or (null extensions) (stringp extensions))
       (%websocket-protocol-error
-       "WebSocket EXTENSIONS must be a string or NIL."
-       extensions))
-    (when extension-selection-policy
-      (unless (functionp extension-selection-policy)
-        (%websocket-protocol-error
-         "EXTENSION-SELECTION-POLICY must be callable or NIL."
-         extension-selection-policy)))
+       "WebSocket EXTENSIONS must be a string or NIL." extensions))
+    (when (and extension-selection-policy
+               (not (functionp extension-selection-policy)))
+      (%websocket-protocol-error
+       "EXTENSION-SELECTION-POLICY must be callable or NIL."
+       extension-selection-policy))
     (unless (or (null proxy) (websocket-proxy-p proxy))
       (%websocket-protocol-error
-       "PROXY must be a WEBSOCKET-PROXY or NIL."
-       proxy))
+       "PROXY must be a WEBSOCKET-PROXY or NIL." proxy))
+    (when (and proxy
+               (eq (websocket-proxy-type proxy) :http-connect)
+               (websocket-proxy-headers proxy))
+      (%websocket-network-failure
+       "Custom HTTP CONNECT proxy headers are not supported by cl-http-kit."
+       :proxy-connect :detail (websocket-proxy-headers proxy)))
     (unless (or (null local-mask-p) (eq local-mask-p t))
       (%websocket-protocol-error
-       "LOCAL-MASK-P must be generalized boolean."
-       local-mask-p))
+       "LOCAL-MASK-P must be generalized boolean." local-mask-p))
     (unless (or (null peer-mask-required-p) (eq peer-mask-required-p t))
       (%websocket-protocol-error
        "PEER-MASK-REQUIRED-P must be generalized boolean."
@@ -1386,16 +1314,13 @@ negotiation; selected extension names must still have been offered."
      payload-reserved-bits "PAYLOAD-RESERVED-BITS")
     (%websocket-network-validate-extension-transformer
      extensions payload-encoder payload-decoder payload-reserved-bits)
-    (when tls-upgrader
-      (unless (functionp tls-upgrader)
-        (%websocket-protocol-error
-         "TLS-UPGRADER must be callable or NIL."
-         tls-upgrader)))
+    (when (and tls-upgrader (not (functionp tls-upgrader)))
+      (%websocket-protocol-error "TLS-UPGRADER must be callable or NIL."
+                                 tls-upgrader))
     (when secure-p
       (unless (%websocket-valid-tls-verify-p tls-verify)
         (%websocket-protocol-error
-         "TLS-VERIFY must be NIL, :OPTIONAL, or :REQUIRED."
-         tls-verify))
+         "TLS-VERIFY must be NIL, :OPTIONAL, or :REQUIRED." tls-verify))
       (unless (%websocket-valid-alpn-protocols-p tls-alpn-protocols)
         (%websocket-protocol-error
          "TLS ALPN protocol names must contain 1 to 255 ASCII characters."
@@ -1404,382 +1329,105 @@ negotiation; selected extension names must still have been offered."
                  (not (member "http/1.1" tls-alpn-protocols
                               :test #'string=)))
         (%websocket-protocol-error
-         "TLS ALPN protocols must include HTTP/1.1."
-         tls-alpn-protocols)))
-    (unwind-protect
-         (progn
-           (multiple-value-bind (opened-stream peer-address peer-port)
-             (%websocket-native-connect
-                (if proxy (websocket-proxy-host proxy) host)
-                (if proxy (websocket-proxy-port proxy) port)
-                effective-deadline clock)
-             (setf stream opened-stream)
-             (setf raw-stream opened-stream)
-             (when proxy
-               (when (websocket-proxy-tls-upgrader proxy)
-                 (multiple-value-bind (proxy-stream selected-alpn)
-                     (%websocket-network-apply-tls
-                      stream
-                      (%websocket-network-proxy-uri proxy)
-                      (websocket-proxy-tls-upgrader proxy)
-                      effective-deadline clock)
-                   (declare (ignore selected-alpn))
-                   (setf stream proxy-stream)))
-               (ecase (websocket-proxy-type proxy)
-                 (:http-connect
-                 (%websocket-network-http-connect
-                   stream proxy host port effective-deadline clock
-                   :max-header-bytes max-header-bytes
-                   :max-fields max-fields
-                   :max-body-bytes max-body-bytes))
-                 (:socks5
-                  (%websocket-network-socks5-connect
-                   stream proxy host port effective-deadline clock))))
-             (when (or secure-p tls-upgrader)
-               (multiple-value-bind (upgraded-stream selected-alpn)
-                   (%websocket-network-apply-tls
-                    stream input-uri
-                    (or tls-upgrader
-                        (make-websocket-tls-upgrader
-                         :verify tls-verify
-                         :alpn-protocols tls-alpn-protocols
-                         :certificate tls-certificate
-                         :key tls-key
-                         :password tls-password
-                         :clock-function clock))
-                    effective-deadline clock)
-                 (setf stream upgraded-stream)
-                 (when (and tls-upgrader selected-alpn)
-                   (%websocket-network-validate-tls-alpn-value
-                    selected-alpn))))
-             (when (and secure-p (null tls-upgrader))
-               (%websocket-network-validate-tls-alpn stream))
-             (setf request
-                   (make-websocket-upgrade-request
-                    uri
-                    :key (or key (generate-websocket-key random-function))
-                    :protocols protocols
-                    :extensions extensions
-                    :headers headers))
-             (multiple-value-bind (response reusable-p)
-                 (websocket-client-handshake
-                  stream request #'%websocket-network-client-sender
-                  :deadline effective-deadline
-                  :max-header-bytes max-header-bytes
-                  :max-fields max-fields
-                  :max-body-bytes max-body-bytes
-                  :extension-selection-policy extension-selection-policy
-                  :clock-function clock)
-               (declare (ignore reusable-p))
-               (let ((selected-extensions
-                       (%websocket-single-header-value
-                        (http-response-headers response)
-                        "Sec-WebSocket-Extensions")))
-                 (%websocket-network-validate-extension-transformer
-                  selected-extensions payload-encoder payload-decoder
-                  payload-reserved-bits)
-                 (setf retained-p t)
-                 (%make-websocket-connection
-                  stream request response
-                  (%websocket-single-header-value
-                   (http-response-headers response)
-                   "Sec-WebSocket-Protocol")
-                  selected-extensions
-                  peer-address peer-port local-mask-p peer-mask-required-p
-                  payload-encoder payload-decoder payload-reserved-bits)))))
-      (unless retained-p
-        (%websocket-network-close-stream-pair stream raw-stream)))))
+         "TLS ALPN protocols must include HTTP/1.1." tls-alpn-protocols)))
+    (setf request
+          (make-websocket-upgrade-request
+           uri :key (or key (generate-websocket-key random-function))
+           :protocols protocols :extensions extensions :headers headers))
+    (let* ((origin-tls-upgrader
+             (or tls-upgrader
+                 (when secure-p
+                   (make-websocket-tls-upgrader
+                    :verify tls-verify :alpn-protocols tls-alpn-protocols
+                    :certificate tls-certificate :key tls-key
+                    :password tls-password :clock-function clock))))
+           (raw-opener
+             (http-kit/network:make-http-network-stream-opener
+              :clock-function clock))
+           (proxy-plan (and proxy
+                            (%websocket-network-proxy-plan
+                             proxy input-uri host port))))
+      (flet ((open-proxy-stream
+                 (request &key timeout deadline proxy-plan (:proxy transport-proxy)
+                          &allow-other-keys)
+               (funcall
+                (%websocket-network-proxy-open-stream
+                 raw-opener proxy raw-stream-pair effective-deadline clock)
+                request :timeout timeout :deadline deadline
+                :proxy-plan proxy-plan :proxy transport-proxy))
+             (close-proxy-stream (opened)
+               (%websocket-network-proxy-close-stream
+                opened raw-stream-pair)))
+        (let* ((tls-callback
+                 (%websocket-network-client-tls-upgrader
+                  proxy origin-tls-upgrader effective-deadline clock))
+               (open-stream
+                 (http-kit/client:make-http-proxy-stream-opener
+                  #'open-proxy-stream
+                  #'close-proxy-stream
+                  :tls-upgrade tls-callback
+                  :resolve-host
+                  (lambda (host &key timeout deadline)
+                    (http-kit/network:http-network-resolve-host
+                     host :timeout timeout :deadline deadline
+                     :clock-function clock))
+                  :clock-function clock)))
+          (unwind-protect
+               (progn
+                 (multiple-value-bind (opened selected-alpn)
+                     (handler-case
+                         (funcall open-stream request :timeout timeout
+                                  :deadline effective-deadline
+                                  :proxy-plan proxy-plan)
+                       (websocket-error (condition) (error condition))
+                       (http-kit:http-error (condition)
+                         (%websocket-network-failure
+                          "The HTTP transport could not open the WebSocket connection."
+                          :connect
+                          :detail (and proxy (websocket-proxy-host proxy))
+                          :cause condition)))
+                   (setf stream opened)
+                   (when (and tls-upgrader (not secure-p))
+                     (multiple-value-bind (upgraded custom-alpn)
+                         (%websocket-network-apply-tls
+                          stream input-uri tls-upgrader effective-deadline clock)
+                       (setf stream upgraded selected-alpn custom-alpn)))
+                   (when (and tls-upgrader selected-alpn)
+                     (%websocket-network-validate-tls-alpn-value selected-alpn))
+                   (when (and secure-p (null tls-upgrader))
+                     (%websocket-network-validate-tls-alpn-value selected-alpn))
+                   (multiple-value-bind (response reusable-p)
+                       (websocket-client-handshake
+                        stream request #'%websocket-network-client-sender
+                        :deadline effective-deadline
+                        :max-header-bytes max-header-bytes
+                        :max-fields max-fields :max-body-bytes max-body-bytes
+                        :extension-selection-policy extension-selection-policy
+                        :clock-function clock)
+                     (declare (ignore reusable-p))
+                     (let ((selected-extensions
+                             (%websocket-single-header-value
+                              (http-response-headers response)
+                              "Sec-WebSocket-Extensions")))
+                       (%websocket-network-validate-extension-transformer
+                        selected-extensions payload-encoder payload-decoder
+                        payload-reserved-bits)
+                       (setf retained-p t)
+                       (%make-websocket-connection
+                        stream request response
+                        (%websocket-single-header-value
+                         (http-response-headers response)
+                         "Sec-WebSocket-Protocol")
+                        selected-extensions nil nil local-mask-p
+                        peer-mask-required-p payload-encoder payload-decoder
+                        payload-reserved-bits)))))
+            (unless retained-p
+              (%websocket-network-close-stream-pair
+               stream (car raw-stream-pair)))))))))
 
 (defun open-websocket-client (uri &rest arguments)
   "Compatibility alias for CONNECT-WEBSOCKET."
   (apply #'connect-websocket uri arguments))
-
-(defun %websocket-network-socks5-host (host)
-  (if (and (plusp (length host))
-           (char= (char host 0) #\[)
-           (char= (char host (1- (length host))) #\]))
-      (subseq host 1 (1- (length host)))
-      host))
-
-(defun %websocket-network-decimal-octet (string start end)
-  (when (= start end)
-    (return-from %websocket-network-decimal-octet (values nil nil)))
-  (let ((value 0))
-    (loop for index from start below end
-          for code = (char-code (char string index))
-          unless (<= (char-code #\0) code (char-code #\9))
-            do (return-from %websocket-network-decimal-octet
-                 (values nil nil))
-          do (setf value (+ (* value 10) (- code (char-code #\0))))
-             (when (> value 255)
-               (return-from %websocket-network-decimal-octet
-                 (values nil nil))))
-    (values value t)))
-
-(defun %websocket-network-ipv4-octets (host)
-  (let ((octets '())
-        (start 0)
-        (length (length host)))
-    (loop for index from 0 to length
-          when (or (= index length)
-                   (char= (char host index) #\.))
-            do (multiple-value-bind (octet valid-p)
-                   (%websocket-network-decimal-octet host start index)
-                 (unless valid-p
-                   (return-from %websocket-network-ipv4-octets nil))
-                 (push octet octets)
-                 (setf start (1+ index))))
-    (when (= 4 (length octets))
-      (coerce (nreverse octets) '(vector (unsigned-byte 8))))))
-
-(defun %websocket-network-hex-group (string)
-  (let ((length (length string)))
-    (when (or (zerop length) (> length 4))
-      (return-from %websocket-network-hex-group nil))
-    (let ((value 0))
-      (loop for character across string
-            for digit = (digit-char-p character 16)
-            unless digit
-              do (return-from %websocket-network-hex-group nil)
-            do (setf value (+ (* value 16) digit)))
-      value)))
-
-(defun %websocket-network-split-colon-groups (string)
-  (when (zerop (length string))
-    (return-from %websocket-network-split-colon-groups '()))
-  (let ((groups '())
-        (start 0)
-        (length (length string)))
-    (loop for index from 0 to length
-          when (or (= index length)
-                   (char= (char string index) #\:))
-            do (when (= start index)
-                 (return-from %websocket-network-split-colon-groups nil))
-               (push (subseq string start index) groups)
-               (setf start (1+ index)))
-    (nreverse groups)))
-
-(defun %websocket-network-ipv6-octets (host)
-  (unless (find #\: host)
-    (return-from %websocket-network-ipv6-octets nil))
-  (let* ((double-colon (search "::" host))
-         (left (if double-colon
-                   (subseq host 0 double-colon)
-                   host))
-         (right (if double-colon
-                    (subseq host (+ double-colon 2))
-                    "")))
-    (when (and double-colon
-               (search "::" host :start2 (+ double-colon 2)))
-      (return-from %websocket-network-ipv6-octets nil))
-    (let ((left-groups (%websocket-network-split-colon-groups left))
-          (right-groups (%websocket-network-split-colon-groups right)))
-      (when (or (null left-groups) (null right-groups))
-        (unless (and (or (zerop (length left))
-                         (plusp (length left-groups)))
-                     (or (zerop (length right))
-                         (plusp (length right-groups))))
-          (return-from %websocket-network-ipv6-octets nil)))
-      (let ((groups (append left-groups right-groups))
-            (expanded-groups '())
-            (ipv4-seen-p nil))
-        (loop for remaining on groups
-              for group = (car remaining)
-              for last-p = (endp (cdr remaining))
-              do (if (find #\. group)
-                     (progn
-                       (unless (and last-p (not ipv4-seen-p))
-                         (return-from %websocket-network-ipv6-octets nil))
-                       (let ((ipv4 (%websocket-network-ipv4-octets group)))
-                         (unless ipv4
-                           (return-from %websocket-network-ipv6-octets nil))
-                         (push (+ (* (aref ipv4 0) 256)
-                                  (aref ipv4 1))
-                               expanded-groups)
-                         (push (+ (* (aref ipv4 2) 256)
-                                  (aref ipv4 3))
-                               expanded-groups)
-                         (setf ipv4-seen-p t)))
-                     (let ((value (%websocket-network-hex-group group)))
-                       (unless value
-                         (return-from %websocket-network-ipv6-octets nil))
-                       (push value expanded-groups))))
-        (setf expanded-groups (nreverse expanded-groups))
-        (when (if double-colon
-                  (>= (length expanded-groups) 8)
-                  (/= (length expanded-groups) 8))
-          (return-from %websocket-network-ipv6-octets nil))
-        (let ((groups
-                (if double-colon
-                    (let ((missing (- 8 (length expanded-groups)))
-                          (left-count (length left-groups)))
-                      (append (subseq expanded-groups 0 left-count)
-                              (make-list missing :initial-element 0)
-                              (subseq expanded-groups left-count)))
-                    expanded-groups))
-              (octets (make-array 16 :element-type '(unsigned-byte 8))))
-          (loop for group in groups
-                for index from 0 by 2
-                do (setf (aref octets index) (ldb (byte 8 8) group)
-                         (aref octets (1+ index)) (ldb (byte 8 0) group)))
-          octets)))))
-
-(defun %websocket-network-socks5-address (host)
-  (let ((host (%websocket-network-socks5-host host)))
-    (let ((octets (%websocket-network-ipv4-octets host)))
-      (when octets
-        (return-from %websocket-network-socks5-address
-          (values 1 octets))))
-    (let ((octets (%websocket-network-ipv6-octets host)))
-      (when octets
-        (return-from %websocket-network-socks5-address
-          (values 4 octets))))
-    (when (find #\: host)
-      (%websocket-protocol-error
-       "A SOCKS5 IPv6 address is invalid."
-       host))
-    (let ((octets (%websocket-network-octets host)))
-      (unless (<= 1 (length octets) 255)
-        (%websocket-protocol-error
-         "A SOCKS5 domain name must contain between 1 and 255 octets."
-         (length octets)))
-      (values 3 octets))))
-
-(defun %websocket-network-socks5-authenticate
-    (stream proxy deadline clock-function)
-  (let* ((username (websocket-proxy-username proxy))
-         (password (websocket-proxy-password proxy))
-         (offer-auth-p (or username password))
-         (methods (make-array (if offer-auth-p 2 1)
-                              :element-type '(unsigned-byte 8))))
-    (setf (aref methods 0) 0)
-    (when offer-auth-p
-      (setf (aref methods 1) 2))
-    (%websocket-network-write-octets
-     stream
-     (let ((message (make-array (+ 2 (length methods))
-                                :element-type '(unsigned-byte 8))))
-       (setf (aref message 0) 5
-             (aref message 1) (length methods))
-       (replace message methods :start1 2)
-       message)
-     deadline clock-function :socks5-greeting-write)
-    (let ((reply (%websocket-network-read-octets
-                  stream 2 deadline clock-function :socks5-greeting-read)))
-      (unless (= (aref reply 0) 5)
-        (%websocket-network-failure
-         "The SOCKS5 proxy returned an invalid greeting version."
-         :socks5-greeting
-         :detail (aref reply 0)))
-      (case (aref reply 1)
-        (0 nil)
-        (2
-         (unless offer-auth-p
-           (%websocket-network-failure
-            "The SOCKS5 proxy requires authentication."
-            :socks5-authentication))
-         (let* ((user-octets (%websocket-network-octets (or username "")))
-                (password-octets (%websocket-network-octets (or password ""))))
-           (unless (and (<= 1 (length user-octets) 255)
-                        (<= 1 (length password-octets) 255))
-             (%websocket-protocol-error
-              "SOCKS5 credentials must fit in one-octet lengths."
-              (list (length user-octets) (length password-octets))))
-           (let ((message (make-array (+ 3 (length user-octets)
-                                      (length password-octets))
-                                      :element-type '(unsigned-byte 8))))
-             (setf (aref message 0) 1
-                   (aref message 1) (length user-octets))
-             (replace message user-octets :start1 2)
-             (setf (aref message (+ 2 (length user-octets)))
-                   (length password-octets))
-             (replace message password-octets
-                      :start1 (+ 3 (length user-octets)))
-             (%websocket-network-write-octets
-              stream message deadline clock-function
-              :socks5-authentication-write))
-           (let ((auth-reply (%websocket-network-read-octets
-                              stream 2 deadline clock-function
-                              :socks5-authentication-read)))
-             (unless (and (= (aref auth-reply 0) 1)
-                          (zerop (aref auth-reply 1)))
-               (%websocket-network-failure
-                "SOCKS5 username/password authentication failed."
-                :socks5-authentication
-                :detail (aref auth-reply 1))))))
-        (t
-         (%websocket-network-failure
-          "The SOCKS5 proxy selected an unsupported authentication method."
-          :socks5-authentication
-          :detail (aref reply 1)))))))
-
-(defun %websocket-network-socks5-read-address
-    (stream address-type deadline clock-function)
-  (case address-type
-    (1 (%websocket-network-read-octets
-        stream 4 deadline clock-function :socks5-reply-address))
-    (3 (let ((length (aref (%websocket-network-read-octets
-                            stream 1 deadline clock-function
-                            :socks5-reply-address)
-                           0)))
-         (unless (plusp length)
-           (%websocket-network-failure
-            "The SOCKS5 proxy returned an empty domain address."
-            :socks5-reply-address
-            :detail length))
-         (%websocket-network-read-octets
-          stream length deadline clock-function :socks5-reply-address)))
-    (4 (%websocket-network-read-octets
-        stream 16 deadline clock-function :socks5-reply-address))
-    (t (%websocket-network-failure
-        "The SOCKS5 proxy returned an unsupported address type."
-        :socks5-reply-address
-        :detail address-type))))
-
-(defun %websocket-network-socks5-connect
-    (stream proxy target-host target-port deadline clock-function)
-  (%websocket-network-socks5-authenticate stream proxy deadline clock-function)
-  (multiple-value-bind (address-type address-octets)
-      (%websocket-network-socks5-address target-host)
-    (let* ((length (length address-octets))
-           (address-start (if (= address-type 3) 5 4))
-           (port-start (+ address-start length))
-           (message (make-array (+ port-start 2)
-                                :element-type '(unsigned-byte 8))))
-      (setf (aref message 0) 5
-            (aref message 1) 1
-            (aref message 2) 0
-            (aref message 3) address-type)
-      (when (= address-type 3)
-        (setf (aref message 4) length))
-      (replace message address-octets :start1 address-start)
-      (setf (aref message port-start) (ldb (byte 8 8) target-port)
-            (aref message (1+ port-start)) (ldb (byte 8 0) target-port))
-      (%websocket-network-write-octets
-       stream message deadline clock-function :socks5-connect-write))
-    (let ((reply (%websocket-network-read-octets
-                  stream 4 deadline clock-function :socks5-connect-read)))
-      (unless (= (aref reply 0) 5)
-        (%websocket-network-failure
-         "The SOCKS5 proxy returned an invalid connection version."
-         :socks5-connect
-         :detail (aref reply 0)))
-      (unless (zerop (aref reply 2))
-        (%websocket-network-failure
-         "The SOCKS5 proxy returned an invalid reserved byte."
-         :socks5-connect
-         :detail (aref reply 2)))
-      (let ((status (aref reply 1)))
-        (unless (zerop status)
-          (%websocket-network-failure
-           "The SOCKS5 proxy rejected the connection request."
-           :socks5-connect
-           :detail status))
-        (%websocket-network-socks5-read-address
-         stream (aref reply 3) deadline clock-function)
-        (%websocket-network-read-octets
-         stream 2 deadline clock-function :socks5-reply-port))))
-  stream)
 
 (defun %websocket-network-listener-open-p (listener)
   (unless (websocket-listener-p listener)

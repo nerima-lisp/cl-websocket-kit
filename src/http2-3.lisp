@@ -47,13 +47,7 @@
     (%websocket-http2-3-fail
      "An HTTP/2 or HTTP/3 pseudo-header requires a colon-prefixed name and string value."
      :detail (list name content)))
-  ;; cl-http-message-kit deliberately rejects pseudo-header names in its
-  ;; public constructor, while HPACK/QPACK still use the same header value
-  ;; object.  Construct the validated representation after applying this
-  ;; protocol's stricter pseudo-header checks.
-  (http-message-kit::%make-http-header
-   :name name
-   :content content))
+  (http-message-kit:make-http-header name content :pseudo-p t))
 
 (defun %websocket-http2-3-octet-vector-p (octets)
   (and (vectorp octets)
@@ -524,218 +518,165 @@
                   headers :http/3 :request-p nil)))
     (error () nil)))
 
-(defstruct (websocket-http2-hpack-context
-             (:constructor %make-websocket-http2-hpack-context)
-             (:conc-name %websocket-http2-hpack-context-))
-  table
-  maximum-size
-  max-size
-  pending-max-size)
+(progn
+  (defstruct (websocket-http2-hpack-context
+               (:constructor %make-websocket-http2-hpack-context)
+               (:conc-name %websocket-http2-hpack-context-))
+    encoder
+    decoder
+    maximum-size
+    max-size)
 
-(defun %websocket-http2-hpack-size-p (size)
-  (and (integerp size) (<= 0 size #xffffffff)))
+  (defun %websocket-http2-hpack-size-p (size)
+    (and (integerp size) (<= 0 size #xffffffff)))
 
-(defun %websocket-http2-hpack-check-size (size label)
-  (unless (%websocket-http2-hpack-size-p size)
-    (%websocket-http2-3-fail
-     "An HTTP/2 HPACK table size must be an unsigned 32-bit integer."
-     :detail (list label size)))
-  size)
+  (defun %websocket-http2-hpack-check-size (size label)
+    (unless (%websocket-http2-hpack-size-p size)
+      (%websocket-http2-3-fail
+       "An HTTP/2 HPACK table size must be an unsigned 32-bit integer."
+       :detail (list label size)))
+    size)
 
-(defun %websocket-http2-hpack-context-table-for (context)
-  (cond
-    ((websocket-http2-hpack-context-p context)
-     (%websocket-http2-hpack-context-table context))
-    ((http-kit/http2::%hpack-context-p context)
-     context)
-    (t
-     (%websocket-http2-3-fail
-      "The HTTP/2 HPACK context is not a supported context object."
-      :detail context))))
+  (defun %websocket-http2-hpack-context-for (context direction)
+    (cond
+      ((websocket-http2-hpack-context-p context)
+       (ecase direction
+         (:encoder (%websocket-http2-hpack-context-encoder context))
+         (:decoder (%websocket-http2-hpack-context-decoder context))))
+      ((http-message-kit:hpack-context-p context)
+       context)
+      (t
+       (%websocket-http2-3-fail
+        "The HTTP/2 HPACK context is not a supported context object."
+        :detail context))))
 
-(defun %websocket-http2-hpack-context-wrapper-p (context)
-  (websocket-http2-hpack-context-p context))
+  (defun %websocket-http2-hpack-context-wrapper-p (context)
+    (websocket-http2-hpack-context-p context))
 
-(defun %websocket-http2-hpack-context-sync (context)
-  (when (%websocket-http2-hpack-context-wrapper-p context)
-    (let ((table (%websocket-http2-hpack-context-table context)))
-      (setf (%websocket-http2-hpack-context-maximum-size context)
-            (http-kit/http2::%hpack-context-maximum-size table)
-            (%websocket-http2-hpack-context-max-size context)
-            (http-kit/http2::%hpack-context-max-size table))))
-  context)
+  (defun make-websocket-http2-hpack-context
+      (&key (maximum-size +websocket-http2-default-hpack-table-size+)
+            (max-size maximum-size))
+    (%websocket-http2-hpack-check-size maximum-size :maximum-size)
+    (%websocket-http2-hpack-check-size max-size :max-size)
+    (when (> max-size maximum-size)
+      (%websocket-http2-3-fail
+       "An HTTP/2 HPACK current table size cannot exceed its maximum size."
+       :detail (list :max-size max-size :maximum-size maximum-size)))
+    (%make-websocket-http2-hpack-context
+     :encoder (http-message-kit:make-hpack-context :max-table-size max-size)
+     :decoder (http-message-kit:make-hpack-context :max-table-size max-size)
+     :maximum-size maximum-size
+     :max-size max-size))
 
-(defun make-websocket-http2-hpack-context
-    (&key (maximum-size +websocket-http2-default-hpack-table-size+)
-          (max-size maximum-size))
-  (%websocket-http2-hpack-check-size maximum-size :maximum-size)
-  (%websocket-http2-hpack-check-size max-size :max-size)
-  (when (> max-size maximum-size)
-    (%websocket-http2-3-fail
-     "An HTTP/2 HPACK current table size cannot exceed its maximum size."
-     :detail (list :max-size max-size :maximum-size maximum-size)))
-  (%make-websocket-http2-hpack-context
-   :table (http-kit/http2::%make-hpack-context
-           :max-size max-size
-           :maximum-size maximum-size)
-   :maximum-size maximum-size
-   :max-size max-size
-   :pending-max-size nil))
+  (defun websocket-http2-hpack-context-size (context)
+    (http-message-kit:hpack-context-table-size
+     (%websocket-http2-hpack-context-for context :encoder)))
 
-(defun websocket-http2-hpack-context-size (context)
-  (let ((table (%websocket-http2-hpack-context-table-for context)))
-    (http-kit/http2::%hpack-context-size table)))
+  (defun websocket-http2-hpack-context-max-size (context)
+    (if (%websocket-http2-hpack-context-wrapper-p context)
+        (%websocket-http2-hpack-context-max-size context)
+        (http-message-kit:hpack-context-table-capacity context)))
 
-(defun websocket-http2-hpack-context-max-size (context)
-  (let ((table (%websocket-http2-hpack-context-table-for context)))
-    (http-kit/http2::%hpack-context-max-size table)))
+  (defun websocket-http2-hpack-context-maximum-size (context)
+    (if (%websocket-http2-hpack-context-wrapper-p context)
+        (%websocket-http2-hpack-context-maximum-size context)
+        (http-message-kit:hpack-context-max-table-size context)))
 
-(defun websocket-http2-hpack-context-maximum-size (context)
-  (let ((table (%websocket-http2-hpack-context-table-for context)))
-    (http-kit/http2::%hpack-context-maximum-size table)))
+  (defun set-websocket-http2-hpack-context-maximum-size (context size)
+    (unless (%websocket-http2-hpack-context-wrapper-p context)
+      (%websocket-http2-3-fail
+       "HPACK table-size limits can only be changed on a WebSocket HPACK context."
+       :detail context))
+    (%websocket-http2-hpack-check-size size :maximum-size)
+    (when (> (%websocket-http2-hpack-context-max-size context) size)
+      (set-websocket-http2-hpack-context-max-size context size))
+    (setf (%websocket-http2-hpack-context-maximum-size context) size)
+    (http-message-kit:hpack-context-set-decoder-max-table-size
+     (%websocket-http2-hpack-context-decoder context)
+     size)
+    context)
 
-(defun set-websocket-http2-hpack-context-maximum-size (context size)
-  (unless (websocket-http2-hpack-context-p context)
-    (%websocket-http2-3-fail
-     "HPACK table-size limits can only be changed on a WebSocket HPACK context."
-     :detail context))
-  (%websocket-http2-hpack-check-size size :maximum-size)
-  (let* ((table (%websocket-http2-hpack-context-table context))
-         (old-max (http-kit/http2::%hpack-context-max-size table)))
-    (http-kit/http2::%hpack-set-maximum-size table size)
-    (%websocket-http2-hpack-context-sync context)
-    (when (/= old-max (http-kit/http2::%hpack-context-max-size table))
-      (setf (%websocket-http2-hpack-context-pending-max-size context)
-            (http-kit/http2::%hpack-context-max-size table)))
-    context))
+  (defun set-websocket-http2-hpack-context-max-size (context size)
+    (unless (%websocket-http2-hpack-context-wrapper-p context)
+      (%websocket-http2-3-fail
+       "HPACK table-size limits can only be changed on a WebSocket HPACK context."
+       :detail context))
+    (%websocket-http2-hpack-check-size size :max-size)
+    (when (> size (%websocket-http2-hpack-context-maximum-size context))
+      (%websocket-http2-3-fail
+       "An HTTP/2 HPACK current table size cannot exceed its maximum size."
+       :detail (list :max-size size
+                     :maximum-size
+                     (%websocket-http2-hpack-context-maximum-size context))))
+    (http-message-kit:hpack-context-set-max-table-size
+     (%websocket-http2-hpack-context-encoder context)
+     size)
+    (http-message-kit:hpack-context-set-max-table-size
+     (%websocket-http2-hpack-context-decoder context)
+     size)
+    (http-message-kit:hpack-context-set-decoder-max-table-size
+     (%websocket-http2-hpack-context-decoder context)
+     (%websocket-http2-hpack-context-maximum-size context))
+    (setf (%websocket-http2-hpack-context-max-size context) size)
+    context)
 
-(defun set-websocket-http2-hpack-context-max-size (context size)
-  (unless (websocket-http2-hpack-context-p context)
-    (%websocket-http2-3-fail
-     "HPACK table-size limits can only be changed on a WebSocket HPACK context."
-     :detail context))
-  (%websocket-http2-hpack-check-size size :max-size)
-  (let* ((table (%websocket-http2-hpack-context-table context))
-         (old-max (http-kit/http2::%hpack-context-max-size table)))
-    (http-kit/http2::%hpack-set-max-size table size)
-    (%websocket-http2-hpack-context-sync context)
-    (when (/= old-max (http-kit/http2::%hpack-context-max-size table))
-      (setf (%websocket-http2-hpack-context-pending-max-size context)
-            (http-kit/http2::%hpack-context-max-size table)))
-    context))
+  (defun %websocket-http2-hpack-sensitive-name-p (name-octets value-octets)
+    (declare (ignore value-octets))
+    (some (lambda (name)
+            (equalp name-octets (%websocket-utf8-octets name)))
+          '("authorization"
+            "proxy-authorization"
+            "cookie"
+            "set-cookie"
+            "sec-websocket-key"
+            "sec-websocket-protocol"
+            "www-authenticate"
+            "proxy-authenticate")))
 
-(defun %websocket-http2-hpack-static-index (name &optional value)
-  (loop with table = http-kit/http2::*hpack-static-table*
-        for index from 1 to (length table)
-        for entry = (aref table (1- index))
-        when (and (string= name (car entry))
-                  (or (null value) (string= value (cdr entry))))
-          do (return index)))
+  (defun encode-websocket-http2-headers
+      (headers &key context (request-p t) trailers-p huffman-p
+                      (max-header-bytes +websocket-default-max-header-bytes+))
+    (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
+    (let* ((normalized (%websocket-http2-3-validate-header-section
+                        headers :http/2
+                        :request-p request-p
+                        :trailers-p trailers-p))
+           (block (http-message-kit:hpack-encode-header-block
+                   normalized
+                   :context (and context
+                                 (%websocket-http2-hpack-context-for
+                                  context :encoder))
+                   :indexing :auto
+                   :huffman huffman-p
+                   :sensitive-predicate
+                   #'%websocket-http2-hpack-sensitive-name-p)))
+      (when (> (length block) max-header-bytes)
+        (%websocket-size-error
+         "The encoded HTTP/2 header block exceeds the selected size limit."
+         max-header-bytes
+         (length block)))
+      block))
 
-(defun %websocket-http2-hpack-dynamic-index
-    (context name &optional value)
-  (loop with table = (%websocket-http2-hpack-context-table-for context)
-        with static-length = (length http-kit/http2::*hpack-static-table*)
-        for entry in (http-kit/http2::%hpack-context-entries table)
-        for offset from 1
-        when (and (string= name (http-kit/http2::%hpack-entry-name entry))
-                  (or (null value)
-                      (string= value (http-kit/http2::%hpack-entry-value entry))))
-          do (return (+ static-length offset))))
-
-(defun %websocket-http2-hpack-index (context name &optional value)
-  (or (%websocket-http2-hpack-static-index name value)
-      (%websocket-http2-hpack-dynamic-index context name value)))
-
-(defun %websocket-http2-hpack-sensitive-name-p (name)
-  (member name '("authorization"
-                 "proxy-authorization"
-                 "cookie"
-                 "set-cookie"
-                 "sec-websocket-key"
-                 "sec-websocket-protocol"
-                 "www-authenticate"
-                 "proxy-authenticate")
-          :test #'string=))
-
-(defun %websocket-http2-hpack-literal-field
-    (context name value prefix prefix-bits huffman-p)
-  (let ((name-index (%websocket-http2-hpack-index context name)))
-    (%websocket-http2-3-append-octets
-     (list
-      (http-kit/http2::%hpack-encode-integer
-       (or name-index 0) prefix-bits prefix)
-      (unless name-index
-        (http-kit/http2::%hpack-encode-string name :huffman-p huffman-p))
-      (http-kit/http2::%hpack-encode-string value :huffman-p huffman-p)))))
-
-(defun %websocket-http2-hpack-encode-dynamic-block
-    (fields context huffman-p)
-  (let* ((wrapper-p (%websocket-http2-hpack-context-wrapper-p context))
-         (table (%websocket-http2-hpack-context-table-for context))
-         (pending (and wrapper-p
-                       (%websocket-http2-hpack-context-pending-max-size context)))
-         (parts nil))
-    (when pending
-      (push (http-kit/http2::%hpack-encode-integer pending 5 #x20) parts))
-    (dolist (field fields)
-      (let ((name (car field))
-            (value (cdr field)))
-        (if (%websocket-http2-hpack-sensitive-name-p name)
-            (push (%websocket-http2-hpack-literal-field
-                   table name value #x10 4 huffman-p)
-                  parts)
-            (let ((index (%websocket-http2-hpack-index table name value)))
-              (if index
-                  (push (http-kit/http2::%hpack-encode-integer index 7 #x80)
-                        parts)
-                  (progn
-                    (push (%websocket-http2-hpack-literal-field
-                           table name value #x40 6 huffman-p)
-                          parts)
-                    (http-kit/http2::%hpack-add table name value)))))))
-    (let ((result (%websocket-http2-3-append-octets (nreverse parts))))
-      (when wrapper-p
-        (setf (%websocket-http2-hpack-context-pending-max-size context) nil))
-      result)))
-
-(defun encode-websocket-http2-headers
-    (headers &key context (request-p t) trailers-p huffman-p
-                    (max-header-bytes +websocket-default-max-header-bytes+))
-  (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
-  (let* ((normalized (%websocket-http2-3-validate-header-section
-                     headers :http/2
-                     :request-p request-p
-                     :trailers-p trailers-p))
-         (pairs (%websocket-http2-3-headers->pairs normalized))
-         (block (if context
-                    (%websocket-http2-hpack-encode-dynamic-block
-                     pairs context huffman-p)
-                    (http-kit/http2::%hpack-encode-block
-                     pairs :huffman-p huffman-p))))
-    (when (> (length block) max-header-bytes)
-      (%websocket-size-error
-       "The encoded HTTP/2 header block exceeds the selected size limit."
-       max-header-bytes
-       (length block)))
-    block))
-
-(defun decode-websocket-http2-headers
-    (octets &key context (request-p t) trailers-p
-                    (max-header-bytes +websocket-default-max-header-bytes+))
-  (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
-  (let* ((octets (%websocket-http2-3-copy-octets octets))
-         (context (or context (http-kit/http2::%make-hpack-context)))
-         (table (%websocket-http2-hpack-context-table-for context))
-         (headers (%websocket-http2-3-pairs->headers
-                   (http-kit/http2::%hpack-decode-block
-                    octets table :max-header-bytes max-header-bytes))))
-    (%websocket-http2-hpack-context-sync context)
-    (values (%websocket-http2-3-validate-header-section
-             headers :http/2
-             :request-p request-p
-             :trailers-p trailers-p)
-            (length octets))))
+  (defun decode-websocket-http2-headers
+      (octets &key context (request-p t) trailers-p
+                      (max-header-bytes +websocket-default-max-header-bytes+))
+    (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
+    (let* ((octets (%websocket-http2-3-copy-octets octets))
+           (engine (and context
+                        (%websocket-http2-hpack-context-for context :decoder))))
+      (multiple-value-bind (headers consumed)
+          (http-message-kit:hpack-decode-header-block
+           octets
+           :context engine
+           :max-header-bytes max-header-bytes)
+        (when (%websocket-http2-hpack-context-wrapper-p context)
+          (setf (%websocket-http2-hpack-context-max-size context)
+                (http-message-kit:hpack-context-table-capacity engine)))
+        (values (%websocket-http2-3-validate-header-section
+                 headers :http/2
+                 :request-p request-p
+                 :trailers-p trailers-p)
+                consumed)))))
 
 (defun encode-websocket-http3-headers
     (headers stream-id &key context (request-p t) trailers-p huffman-p
