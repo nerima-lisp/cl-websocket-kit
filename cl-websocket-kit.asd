@@ -10,7 +10,9 @@
                "cl-http-kit/network"
                "cl-http-kit/tls"
                "cl-http-kit/http2"
-               "cl-http-kit/http3")
+               "cl-http-kit/http3"
+               "cl-tls-kit"
+               "cl-crypto-kit")
   :pathname "src"
   :serial t
   :components ((:file "package")
@@ -26,7 +28,8 @@
                (:file "http2-3-session")
                (:file "http2-3-connection")
                (:file "handshake")
-               (:file "network"))
+               (:file "network")
+               (:file "tls-server"))
   :in-order-to ((test-op (test-op "cl-websocket-kit/test"))))
 
 (asdf:defsystem "cl-websocket-kit/test"
@@ -42,6 +45,7 @@
                (:file "tests-http2-3-session")
                (:file "tests-http2-3-connection")
                (:file "tests-network")
+               (:file "tests-tls")
                (:file "tests-handshake")
                (:file "runner"))
   :perform (asdf:test-op (op c)

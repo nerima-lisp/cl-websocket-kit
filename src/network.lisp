@@ -1097,54 +1097,18 @@ TLS callbacks may return the selected ALPN protocol as a second value."
    :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
-    (&key certificate key password (alpn-protocols '("http/1.1"))
+    (&key certificate key password (alpn-protocols (list "http/1.1"))
           (unwrap-stream-p nil)
-          (clock-function #'%websocket-monotonic-time))
-  "Return a server callback that upgrades an accepted stream to TLS.
+          (clock-function (function %websocket-monotonic-time)))
+  "Return a TLS 1.3 server callback using cl-tls-kit.
 
-CERTIFICATE and KEY are required because a server cannot complete a TLS
-handshake without an identity. The callback returns the selected ALPN
-protocol as a second value when cl+ssl reports one."
-  (unless (%websocket-valid-certificate-pair-p certificate key t)
-    (%websocket-protocol-error
-     "TLS server certificates require both CERTIFICATE and KEY."
-     (list :certificate certificate :key key)))
-  (unless (%websocket-valid-alpn-protocols-p alpn-protocols)
-    (%websocket-protocol-error
-     "TLS ALPN-PROTOCOLS must be a list of non-empty ASCII protocol names."
-     alpn-protocols))
-  (when (and alpn-protocols
-             (not (member "http/1.1" alpn-protocols :test #'string=)))
-    (%websocket-protocol-error
-     "TLS server ALPN-PROTOCOLS must include HTTP/1.1."
-     alpn-protocols))
-  (unless (functionp clock-function)
-    (%websocket-protocol-error
-     "TLS CLOCK-FUNCTION must be callable."
-     clock-function))
-  (let ((make-server-stream (%websocket-tls-function "MAKE-SSL-SERVER-STREAM")))
-    (lambda (stream &key timeout deadline &allow-other-keys)
-      (unless (streamp stream)
-        (%websocket-protocol-error
-         "TLS upgrade requires a Lisp stream."
-         stream))
-      (let ((effective-deadline
-              (%websocket-effective-deadline
-               timeout deadline clock-function)))
-        (let ((tls-stream
-                (%websocket-call-with-deadline
-                 (lambda ()
-                   (funcall make-server-stream
-                            stream
-                            :unwrap-stream-p unwrap-stream-p
-                            :external-format nil
-                            :alpn-protocols alpn-protocols
-                            :certificate certificate
-                            :key key
-                            :password password))
-                 effective-deadline clock-function :tls)))
-          (values tls-stream
-                  (websocket-tls-selected-alpn-protocol tls-stream)))))))
+CERTIFICATE accepts a PEM path or DER chain. KEY accepts an unencrypted
+P-256 or Ed25519 PEM path or a cl-crypto-kit private-key object. PASSWORD
+and UNWRAP-STREAM-P must be NIL."
+  (%websocket-make-tls-server-wrapper
+   :certificate certificate :key key :password password
+   :alpn-protocols alpn-protocols :unwrap-stream-p unwrap-stream-p
+   :clock-function clock-function))
 
 (defun %websocket-network-proxy-open-stream
     (raw-opener websocket-proxy raw-stream-pair clock-function)

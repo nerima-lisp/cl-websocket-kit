@@ -7,15 +7,17 @@ and HTTP/3 network transport layer: frame encoding and decoding, masking,
 fragmentation, control frames, close codes, UTF-8 validation, bounded message
 assembly, the permessage-deflate extension, the HTTP Upgrade handshake,
 persistent HTTP/1.1 connections, HTTP/2 and HTTP/3 extended CONNECT
-bootstrapping, TCP client/listener lifecycle, optional TLS, and HTTP
-CONNECT/SOCKS5 proxy traversal.
+bootstrapping, TCP client/listener lifecycle, TLS client upgrading, TLS 1.3
+WSS listeners, and HTTP CONNECT/SOCKS5 proxy traversal.
 
 It uses
 [cl-http-message-kit](https://github.com/nerima-lisp/cl-http-message-kit) for
 HTTP request and response values and `cl-http-kit/http2` plus
 `cl-http-kit/http3` for the HTTP/2 and HTTP/3 header and frame codecs. Native
-TCP and DNS support is provided on SBCL. TLS is optional and loaded through
-`cl+ssl` when that system is installed.
+TCP and DNS support is provided on SBCL. Client-side TLS uses `cl-http-kit` by
+default through `make-websocket-tls-upgrader`; `connect-websocket` also accepts
+a custom `:tls-upgrader` callback. The TLS server wrapper uses `cl-tls-kit` and
+requires SBCL.
 
 ## Install
 
@@ -67,7 +69,7 @@ A masking key is never generated implicitly. `make-websocket-frame` takes
 is stated at the client boundary rather than buried in a library default.
 
 `make-websocket-upgrade-request` likewise requires `:key`, the Base64
-`Sec-WebSocket-Key`, for the same reason.
+`Sec-WebSocket-Key`.
 
 WebSocket URI strings using `ws` or `wss` are accepted by
 `make-websocket-upgrade-request` and mapped to the underlying HTTP model as
@@ -130,6 +132,15 @@ body bytes; `serve-websocket-listener` also applies the default WebSocket
 message, payload, fragment, and control-frame limits. Explicit `NIL` can
 disable the HTTP/1.1 timeout or boundary for a low-level caller, while
 session message limits must be positive integers when overridden.
+
+`make-websocket-tls-server-wrapper` provides TLS 1.3 for
+`open-websocket-listener` through its `:tls-wrapper` argument. The wrapper
+accepts a PEM certificate path or a DER certificate chain and an unencrypted
+P-256 or Ed25519 private key in PEM or DER form, or a `cl-crypto-kit` private
+key object. Encrypted keys and RSA keys are unsupported. `:password` and
+`:unwrap-stream-p` must be `NIL`. The server supports
+`TLS_AES_128_GCM_SHA256`; its default ALPN list contains `http/1.1`, and any
+configured ALPN list must also contain that protocol.
 
 The built-in request, response, and network path is HTTP/1.1. The kit also
 provides transport-agnostic HTTP/2 and HTTP/3 extended CONNECT header, frame,
@@ -195,6 +206,3 @@ before enabling the matching RSV bit.
 the specific ones first: a budget breach closes with 1009, invalid UTF-8 with
 1007, and any other protocol fault with 1002.
 
-## License
-
-MIT. See [LICENSE](LICENSE).
