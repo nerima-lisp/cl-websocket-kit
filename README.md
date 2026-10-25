@@ -2,13 +2,14 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-cl-websocket-kit implements RFC 6455 together with a bounded HTTP/1.1, HTTP/2,
-and HTTP/3 network transport layer: frame encoding and decoding, masking,
-fragmentation, control frames, close codes, UTF-8 validation, bounded message
-assembly, the permessage-deflate extension, the HTTP Upgrade handshake,
-persistent HTTP/1.1 connections, HTTP/2 and HTTP/3 extended CONNECT
-bootstrapping, TCP client/listener lifecycle, TLS client upgrading, TLS 1.3
-WSS listeners, and HTTP CONNECT/SOCKS5 proxy traversal.
+cl-websocket-kit implements RFC 6455. Its built-in TCP client and listener use
+HTTP/1.1; its HTTP/2 and HTTP/3 extended CONNECT support is transport-agnostic.
+Features include frame encoding and decoding, masking, fragmentation, control
+frames, close codes, UTF-8 validation, bounded message assembly, the
+permessage-deflate extension, the HTTP Upgrade handshake, persistent HTTP/1.1
+connections, HTTP/2 and HTTP/3 extended CONNECT codecs and sessions, TCP
+client/listener lifecycle, TLS client upgrading, TLS 1.3 WSS listeners, and
+HTTP CONNECT/SOCKS5 proxy traversal.
 
 It uses
 [cl-http-message-kit](https://github.com/nerima-lisp/cl-http-message-kit) for
@@ -140,8 +141,10 @@ session message limits must be positive integers when overridden.
 `:idle-timeout`. It defaults to one worker, while `:session-timeout` and
 `:idle-timeout` default to `NIL`, so established sessions have no session or
 idle timeout unless the application sets one. A single worker can remain
-occupied by an idle client. On SBCL, configure multiple workers and finite
-timeouts, for example:
+occupied by an idle client. On SBCL, create `listener` with
+`(websocket-kit:open-websocket-listener :port 8080)` and define
+`handle-websocket-message` in your application. Configure multiple workers and
+finite timeouts, for example:
 
 ```lisp
 (websocket-kit:serve-websocket-listener
@@ -155,11 +158,13 @@ timeouts, for example:
   '("https://app.example.com")))
 ```
 
-Use a listener returned by `open-websocket-listener` and define
-`handle-websocket-message` in the application. Timeout values are seconds. This
-example allows four concurrent sessions, limits each session to one hour, and
-closes an inactive connection after five minutes. The Origin allowlist matches
-`https://app.example.com` exactly.
+Timeout values are seconds. This example allows four concurrent sessions,
+limits each session to one hour, and closes an inactive connection after five
+minutes. The Origin allowlist matches `https://app.example.com` exactly. To send
+an automatic Ping when a session is otherwise idle, set `:heartbeat-interval`;
+`:heartbeat-timeout` defaults to that interval and closes the session if the
+matching Pong does not arrive. `serve-websocket-listener` forwards both options
+to each session.
 
 `make-websocket-tls-server-wrapper` provides TLS 1.3 for
 `open-websocket-listener` through its `:tls-wrapper` argument. The wrapper
@@ -209,10 +214,7 @@ transport callbacks as `:deadline`; calls without a deadline retain the
 legacy callback shape.
 WebSocket extension payload transformations are integrated through
 `PAYLOAD-ENCODER`, `PAYLOAD-DECODER`, and RSV options on frame, message,
-connection, and session APIs. The bundled permessage-deflate codec can be used
-as the concrete codec, but negotiation/selection policy and the per-connection
-state choice remain application-controlled; validate its RSV/message semantics
-before enabling the matching RSV bit.
+connection, and session APIs.
 
 ## API
 
