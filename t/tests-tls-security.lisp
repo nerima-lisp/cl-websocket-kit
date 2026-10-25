@@ -343,3 +343,35 @@
              (close-websocket-listener listener)
              (when server-thread
                (sb-thread:join-thread server-thread)))))))))
+
+#+sbcl
+(describe "TLS 1.3 WSS ticket policy"
+  (it "filters NewSessionTicket before writing TLS records"
+    (let* ((context (websocket-kit::%make-websocket-tls-context nil nil nil))
+           (symbol 'websocket-kit::%websocket-tls-write-fragment)
+           (original (symbol-function symbol))
+           (sent nil))
+      (unwind-protect
+           (progn
+             (sb-ext:without-package-locks
+               (setf (symbol-function symbol)
+                     (lambda
+                         (transport context content-type wire level deadline clock-function)
+                       (declare (ignore transport context level deadline clock-function))
+                       (push (list :content-type content-type :wire (copy-seq wire))
+                             sent))))
+             (websocket-kit::%websocket-tls-process-events
+              context nil
+              (list
+               (list :type :send :content-type :handshake :level :application
+                     :wire (octets #x04 0 0 1 0))
+               (list :type :send :content-type :handshake :level :application
+                     :wire (octets #x18 0 0 1 0)))
+              nil nil)
+             (expect (length sent) :to-equal 1)
+             (expect (getf (first sent) :content-type)
+                     :to-equal cl-tls-kit:+tls-content-type-handshake+)
+             (expect (getf (first sent) :wire)
+                     :to-equalp (octets #x18 0 0 1 0)))
+        (sb-ext:without-package-locks
+          (setf (symbol-function symbol) original))))))

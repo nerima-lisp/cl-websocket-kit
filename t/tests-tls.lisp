@@ -44,12 +44,12 @@
           (when (probe-file path)
             (delete-file path))))))
 
-  (defun %tls-test-client-driver (listener trust-anchor alpn)
+  (defun %tls-test-client-driver (listener trust-anchor alpn &key ticket-store)
     (cl-tls-kit:make-tls13-client-driver-over-tcp
      "127.0.0.1" (websocket-listener-port listener)
      :provider (cl-tls-kit:make-cl-crypto-kit-provider)
      :trust-anchors (list trust-anchor)
-     :alpn alpn))
+     :alpn alpn :ticket-store ticket-store))
 
   (defun %tls-test-read-application-data (driver)
     (multiple-value-bind (status octets)
@@ -377,3 +377,62 @@
              (when server-thread
                (sb-thread:join-thread server-thread)))))
        :subject-alt-name "DNS:localhost")))
+
+#+sbcl
+(describe "TLS 1.3 WSS ticket policy"
+  (it "does not deliver NewSessionTicket to a WSS client"
+    (%tls-test-with-certificate
+     (lambda (certificate key trust-anchor)
+       (let* ((listener
+                (open-websocket-listener
+                 :host "127.0.0.1" :port 0
+                 :tls-wrapper
+                 (make-websocket-tls-server-wrapper
+                  :certificate certificate :key key)))
+              (server-error nil)
+              (server-thread nil)
+              (ticket-store-clock-calls 0)
+              (driver nil))
+         (unwind-protect
+              (progn
+                (setf server-thread
+                      (sb-thread:make-thread
+                       (lambda ()
+                         (handler-case
+                             (let ((connection
+                                     (accept-websocket-connection
+                                      listener :timeout 15
+                                      :on-error
+                                      (lambda (condition)
+                                        (setf server-error condition)))))
+                               (unless connection
+                                 (error "The WSS client did not upgrade."))
+                               (close-websocket-connection
+                                connection :send-close-p nil))
+                           (error (condition)
+                             (setf server-error condition))))))
+                (setf driver
+                      (%tls-test-client-driver
+                       listener trust-anchor '("http/1.1")
+                       :ticket-store
+                       (cl-tls-kit:make-tls13-ticket-store
+                        :clock (lambda ()
+                                 (incf ticket-store-clock-calls)))))
+                (cl-tls-kit:tls13-client-driver-connect driver)
+                (let ((response (%tls-test-websocket-upgrade driver)))
+                  (expect (http-response-status response) :to-equal 101))
+                (multiple-value-bind (status octets)
+                    (cl-tls-kit:tls13-client-driver-read-application-data driver)
+                  (declare (ignore octets))
+                  (expect status :to-equal :eof))
+                (sb-thread:join-thread server-thread)
+                (setf server-thread nil)
+                ;; ClientHello performs one empty-store lookup; each received ticket adds one.
+                (expect ticket-store-clock-calls :to-equal 1)
+                (expect server-error :to-be nil))
+           (when driver
+             (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
+           (when server-thread
+             (ignore-errors (close-websocket-listener listener))
+             (sb-thread:join-thread server-thread))
+           (close-websocket-listener listener)))))))

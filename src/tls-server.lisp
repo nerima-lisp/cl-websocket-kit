@@ -361,10 +361,17 @@
   (dolist (event events)
     (case (getf event :type)
       (:send
-       (%websocket-tls-write-fragment
-        transport context
-        (%websocket-tls-content-type (getf event :content-type))
-        (getf event :wire) (getf event :level) deadline clock-function))
+       (let ((content-type (getf event :content-type))
+             (level (getf event :level))
+             (wire (getf event :wire)))
+         ;; WSS does not support resumption, so do not send TLS 1.3 tickets.
+         (unless (and (eq content-type :handshake)
+                      (eq level :application)
+                      (plusp (length wire))
+                      (= (aref wire 0) #x04))
+           (%websocket-tls-write-fragment
+            transport context (%websocket-tls-content-type content-type)
+            wire level deadline clock-function))))
       (:secret
        (%websocket-tls-traffic-state
         context (getf event :direction) (getf event :level)

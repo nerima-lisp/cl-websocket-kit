@@ -175,6 +175,9 @@ key object. Encrypted keys and RSA keys are unsupported. `:password` and
 `TLS_AES_128_GCM_SHA256`; its default ALPN list contains `http/1.1`, and any
 configured ALPN list must also contain that protocol.
 
+The WSS server does not send TLS 1.3 `NewSessionTicket` messages, so TLS session
+resumption is unavailable and each connection performs a full handshake.
+
 The built-in request, response, and network path is HTTP/1.1. The kit also
 provides transport-agnostic HTTP/2 and HTTP/3 extended CONNECT header, frame,
 and SETTINGS codecs, including stateful HPACK/QPACK handling and HTTP/2
