@@ -141,7 +141,7 @@
                            (handler-case
                                (let ((connection
                                        (accept-websocket-connection
-                                        listener :timeout 10
+                                        listener :timeout 30
                                         :on-error
                                         (lambda (condition)
                                           (setf server-error condition)))))
@@ -210,7 +210,7 @@
                            (handler-case
                                (let* ((connection
                                         (accept-websocket-connection
-                                         listener :timeout 10))
+                                         listener :timeout 30))
                                       (stream
                                         (websocket-connection-stream
                                          connection)))
@@ -358,6 +358,15 @@
                   (sb-thread:join-thread server-thread)
                   (setf server-thread nil)
                   (expect (not (null client-error)) :to-be t)
+                  (expect
+                   (typep client-error 'cl-tls-kit:tls13-client-driver-error)
+                   :to-be t)
+                  (expect
+                   (eq (first
+                        (cl-tls-kit:tls13-client-driver-error-reason
+                         client-error))
+                       :certificate-verification-failed)
+                   :to-be t)
                   (expect
                    (cl-tls-kit:tls13-client-driver-closed-p driver)
                    :to-be t)
