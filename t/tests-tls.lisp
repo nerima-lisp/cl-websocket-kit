@@ -17,7 +17,8 @@
         (error "OpenSSL could not create TLS test credentials: ~A~%~A"
                output error-output))))
 
-  (defun %tls-test-with-certificate (function)
+  (defun %tls-test-with-certificate
+      (function &key (subject-alt-name "DNS:localhost,IP:127.0.0.1"))
     (let ((certificate (%tls-test-path "certificate"))
           (key (%tls-test-path "key")))
       (unwind-protect
@@ -27,7 +28,7 @@
               "-pkeyopt" "ec_paramgen_curve:P-256" "-nodes"
               "-keyout" (namestring key) "-out" (namestring certificate)
               "-days" "1" "-subj" "/CN=localhost"
-              "-addext" "subjectAltName=DNS:localhost"
+              "-addext" (format nil "subjectAltName=~A" subject-alt-name)
               "-addext" "basicConstraints=critical,CA:FALSE"
               "-addext" "keyUsage=critical,digitalSignature"
               "-addext" "extendedKeyUsage=serverAuth")
@@ -47,7 +48,6 @@
     (cl-tls-kit:make-tls13-client-driver-over-tcp
      "127.0.0.1" (websocket-listener-port listener)
      :provider (cl-tls-kit:make-cl-crypto-kit-provider)
-     :hostname "localhost"
      :trust-anchors (list trust-anchor)
      :alpn alpn))
 
@@ -302,9 +302,59 @@
                   (sb-thread:join-thread server-thread)
                   (setf server-thread nil)
                   (expect (not (null client-error)) :to-be t)
+                  (expect (not (null server-error)) :to-be t)
+                  (expect
+                   (cl-tls-kit:tls13-client-driver-closed-p driver)
+                   :to-be t))
+             (when driver
+               (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
+             (close-websocket-listener listener)
+             (when server-thread
+               (sb-thread:join-thread server-thread))))))))
+
+    (it "defaults TLS hostname verification to the TCP host"
+      (%tls-test-with-certificate
+       (lambda (certificate key trust-anchor)
+         (let* ((listener
+                  (open-websocket-listener
+                   :host "127.0.0.1" :port 0
+                   :tls-wrapper
+                   (make-websocket-tls-server-wrapper
+                    :certificate certificate :key key)))
+                (server-error nil)
+                (server-thread nil)
+                (driver nil)
+                (client-error nil))
+           (unwind-protect
+                (progn
+                  (setf server-thread
+                        (sb-thread:make-thread
+                         (lambda ()
+                           (handler-case
+                               (accept-websocket-connection
+                                listener :timeout 10
+                                :on-error
+                                (lambda (condition)
+                                  (setf server-error condition)))
+                             (error (condition)
+                               (setf server-error condition))))))
+                  (setf driver
+                        (%tls-test-client-driver
+                         listener trust-anchor '("http/1.1")))
+                  (handler-case
+                      (cl-tls-kit:tls13-client-driver-connect driver)
+                    (error (condition)
+                      (setf client-error condition)))
+                  (sb-thread:join-thread server-thread)
+                  (setf server-thread nil)
+                  (expect (not (null client-error)) :to-be t)
+                  (expect
+                   (cl-tls-kit:tls13-client-driver-closed-p driver)
+                   :to-be t)
                   (expect (not (null server-error)) :to-be t))
              (when driver
                (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
              (close-websocket-listener listener)
              (when server-thread
-               (sb-thread:join-thread server-thread)))))))))
+               (sb-thread:join-thread server-thread)))))
+       :subject-alt-name "DNS:localhost")))
