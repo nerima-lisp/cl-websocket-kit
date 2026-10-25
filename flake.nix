@@ -40,7 +40,7 @@
     };
 
     cl-tls-kit = {
-      url = "github:nerima-lisp/cl-tls-kit/v0.4.0";
+      url = "github:nerima-lisp/cl-tls-kit/f39e05059c572bb51df93dd25f619d64d6749ecc";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.cl-weave.follows = "cl-weave";
       inputs.cl-crypto-kit.follows = "cl-crypto-kit";
@@ -63,7 +63,7 @@
     };
 
     cl-http-kit = {
-      url = "github:nerima-lisp/cl-http-kit/2d85f0c423f59811773f9412b950a539c5ffbdc7";
+      url = "github:nerima-lisp/cl-http-kit/48d5a0141fe8899571b79a2b1027f481c1d8307f";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.cl-weave.follows = "cl-weave";
       inputs.cl-boundary-kit.follows = "cl-boundary-kit";
