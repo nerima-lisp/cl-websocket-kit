@@ -198,18 +198,23 @@
           cryptoKit = mkCommonLispSource pkgs "cl-crypto-kit" cl-crypto-kit;
           tlsKit = mkCommonLispSource pkgs "cl-tls-kit" cl-tls-kit;
           quicKit = mkCommonLispSource pkgs "cl-quic-kit" cl-quic-kit;
-          sourceRegistry = builtins.concatStringsSep ":" [
-            "${messageKit}/share/common-lisp/source/cl-http-message-kit"
-            "${hpackKit}/share/common-lisp/source/cl-hpack-codec-kit"
-            "${httpKit}/share/common-lisp/source/cl-http-kit"
-            "${boundaryKit}/share/common-lisp/source/cl-boundary-kit"
-            "${hostKit}/share/common-lisp/source/cl-host-kit"
-            "${codecKit}/share/common-lisp/source/cl-codec-kit"
-            "${deflateKit}/share/common-lisp/source/cl-deflate-kit"
-            "${cryptoKit}/share/common-lisp/source/cl-crypto-kit"
-            "${tlsKit}/share/common-lisp/source/cl-tls-kit"
-            "${quicKit}/share/common-lisp/source/cl-quic-kit"
-          ];
+          bordeauxThreads = pkgs.sbclPackages.bordeaux-threads;
+          sourceRegistry = builtins.concatStringsSep ":" (
+            [
+              "${messageKit}/share/common-lisp/source/cl-http-message-kit"
+              "${hpackKit}/share/common-lisp/source/cl-hpack-codec-kit"
+              "${httpKit}/share/common-lisp/source/cl-http-kit"
+              "${boundaryKit}/share/common-lisp/source/cl-boundary-kit"
+              "${hostKit}/share/common-lisp/source/cl-host-kit"
+              "${codecKit}/share/common-lisp/source/cl-codec-kit"
+              "${deflateKit}/share/common-lisp/source/cl-deflate-kit"
+              "${cryptoKit}/share/common-lisp/source/cl-crypto-kit"
+              "${tlsKit}/share/common-lisp/source/cl-tls-kit"
+              "${quicKit}/share/common-lisp/source/cl-quic-kit"
+              "${bordeauxThreads}"
+            ]
+            ++ map toString bordeauxThreads.propagatedBuildInputs
+          );
           test = pkgs.writeShellApplication {
             name = "cl-websocket-kit-test";
             runtimeInputs = [
@@ -229,6 +234,7 @@
               quicKit
             ];
             text = ''
+              export SBCL_HOME="${pkgs.sbcl}/lib/sbcl"
               export CL_SOURCE_REGISTRY="$PWD:${sourceRegistry}"
               cl-weave run --load "$PWD/cl-websocket-kit.asd" \
                 cl-websocket-kit/test --reporter spec --max-workers 1 \
