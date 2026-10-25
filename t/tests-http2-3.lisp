@@ -58,6 +58,56 @@
         (expect (websocket-http3-extended-connect-p decoded)
                 :to-equalp
                 t))))
+  (it "round trips dynamic QPACK fields with public contexts"
+    (let* ((encoder
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 4096 :table-capacity 0))
+           (decoder
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 4096 :table-capacity 0))
+           (capacity-wire
+             (http-message-kit:qpack-encode-set-capacity encoder 4096))
+           (insert-wire
+             (http-message-kit:qpack-encode-insert-with-literal-name
+              encoder "x-dynamic" "one"))
+           (insert-count-wire
+             (http-message-kit:qpack-encode-insert-count-increment 1))
+           (headers
+             (append
+              (make-websocket-http2-connect-headers "example.test")
+              (list
+               (http-message-kit:make-http-header "x-dynamic" "one"))))
+           (qpack-wire nil))
+      (multiple-value-bind (events consumed)
+          (http-message-kit:qpack-decode-encoder-stream decoder capacity-wire)
+        (expect consumed :to-equalp (length capacity-wire))
+        (expect (plusp (length events)) :to-equalp t))
+      (multiple-value-bind (events consumed)
+          (http-message-kit:qpack-decode-encoder-stream decoder insert-wire)
+        (expect consumed :to-equalp (length insert-wire))
+        (expect (plusp (length events)) :to-equalp t))
+      (multiple-value-bind (events consumed)
+          (http-message-kit:qpack-decode-decoder-stream
+           encoder insert-count-wire)
+        (expect consumed :to-equalp (length insert-count-wire))
+        (expect events :to-equalp '((:insert-count-increment 1))))
+      (setf qpack-wire
+            (encode-websocket-http3-headers headers 0 :context encoder))
+      (multiple-value-bind (decoded consumed)
+          (decode-websocket-http3-headers
+           qpack-wire 0 :context decoder)
+        (expect consumed :to-equalp (length qpack-wire))
+        (expect (websocket-http3-extended-connect-p decoded)
+                :to-equalp
+                t)
+        (expect (http-message-kit:http-header-value decoded "x-dynamic")
+                :to-equal
+                "one"))
+      (let ((ack-wire (http-message-kit:qpack-encode-section-ack 0)))
+        (multiple-value-bind (events consumed)
+            (http-message-kit:qpack-decode-decoder-stream encoder ack-wire)
+          (expect consumed :to-equalp (length ack-wire))
+          (expect events :to-equalp '((:section-ack 0)))))))
 
   (it "round trips stateful HPACK blocks and reuses the dynamic table"
       (let* ((headers
