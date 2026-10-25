@@ -342,7 +342,7 @@
                          (lambda ()
                            (handler-case
                                (accept-websocket-connection
-                                listener :timeout 10
+                                listener :timeout 30
                                 :on-error
                                 (lambda (condition)
                                   (setf server-error condition)))
