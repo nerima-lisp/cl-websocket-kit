@@ -8,7 +8,7 @@
 (defconstant +websocket-http2-3-default-initial-window-size+ 65535)
 (defconstant +websocket-http2-default-hpack-table-size+ 4096)
 (defconstant +websocket-http2-enable-connect-protocol-setting+ 8)
-(defconstant +websocket-http3-enable-connect-protocol-setting+ 8)
+(progn (defconstant +websocket-http3-enable-connect-protocol-setting+ 8) (defconstant +websocket-http3-setting-qpack-max-table-capacity+ 1) (defconstant +websocket-http3-setting-max-field-section-size+ 6) (defconstant +websocket-http3-setting-qpack-blocked-streams+ 7))
 
 (defun %websocket-http2-3-fail (message &key detail)
   (error 'websocket-http-error
@@ -678,24 +678,34 @@
                  :trailers-p trailers-p)
                 consumed)))))
 
+(defun %websocket-http3-prepare-header-block
+    (headers stream-id context request-p trailers-p huffman-p max-header-bytes)
+  (%websocket-http2-3-check-http3-stream-id stream-id)
+  (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
+  (let ((normalized
+          (%websocket-http2-3-validate-header-section
+           headers :http/3 :request-p request-p :trailers-p trailers-p)))
+    (multiple-value-bind (block transaction)
+        (http-message-kit:qpack-prepare-header-block
+         (%websocket-http2-3-headers->pairs normalized)
+         :context context
+         :use-dynamic-p (not (null context))
+         :huffman huffman-p
+         :stream-id (and context stream-id))
+      (when (> (length block) max-header-bytes)
+        (%websocket-size-error
+         "The encoded HTTP/3 header block exceeds the selected size limit."
+         max-header-bytes
+         (length block)))
+      (values block transaction))))
+
 (defun encode-websocket-http3-headers
     (headers stream-id &key context (request-p t) trailers-p huffman-p
                     (max-header-bytes +websocket-default-max-header-bytes+))
-  (%websocket-http2-3-check-http3-stream-id stream-id)
-  (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
-  (let* ((normalized (%websocket-http2-3-validate-header-section
-                     headers :http/3
-                     :request-p request-p
-                     :trailers-p trailers-p))
-         (block (http-kit/http3:qpack-encode-field-section
-                 (%websocket-http2-3-headers->pairs normalized)
-                 :dynamic-table context
-                 :huffman-p huffman-p)))
-    (when (> (length block) max-header-bytes)
-      (%websocket-size-error
-       "The encoded HTTP/3 header block exceeds the selected size limit."
-       max-header-bytes
-       (length block)))
+  (multiple-value-bind (block transaction)
+      (%websocket-http3-prepare-header-block
+       headers stream-id context request-p trailers-p huffman-p max-header-bytes)
+    (http-message-kit:qpack-commit-encoding transaction)
     block))
 
 (defun decode-websocket-http3-headers
@@ -703,23 +713,18 @@
                                (max-header-bytes +websocket-default-max-header-bytes+))
   (%websocket-http2-3-check-http3-stream-id stream-id)
   (%websocket-validate-limit max-header-bytes "MAX-HEADER-BYTES")
-  (let* ((octets (%websocket-http2-3-copy-octets octets))
-         (headers
-           (%websocket-http2-3-pairs->headers
-            (http-kit/http3:qpack-decode-field-section
-             octets
-             :dynamic-table context
-             :max-table-capacity
-             (if context
-                 (http-kit/http3:qpack-dynamic-table-max-capacity context)
-                 0)
-             :max-header-bytes max-header-bytes
-             :max-fields 256))))
-    (values (%websocket-http2-3-validate-header-section
-             headers :http/3
-             :request-p request-p
-             :trailers-p trailers-p)
-            (length octets))))
+  (let ((octets (%websocket-http2-3-copy-octets octets)))
+    (multiple-value-bind (headers consumed)
+        (http-message-kit:qpack-decode-header-block
+         octets
+         :context context
+         :stream-id stream-id
+         :max-header-bytes max-header-bytes
+         :max-fields 256)
+      (values
+       (%websocket-http2-3-validate-header-section
+        headers :http/3 :request-p request-p :trailers-p trailers-p)
+       consumed))))
 
 (defun encode-websocket-http2-headers-frames
     (headers stream-id &key context (request-p t) trailers-p end-stream-p huffman-p
@@ -888,20 +893,16 @@
             (%websocket-http2-frame-stream-id frame)
             (logtest #x1 (%websocket-http2-frame-flags frame)))))
 
-(defun encode-websocket-http3-headers-frame
-    (headers stream-id &key context (request-p t) trailers-p huffman-p
-                         (max-frame-size +websocket-http3-default-max-frame-size+)
-                         (max-header-block-bytes +websocket-default-max-header-bytes+))
+(defun %websocket-http3-prepare-headers-frame
+    (headers stream-id context request-p trailers-p huffman-p max-frame-size
+     max-header-block-bytes)
   (%websocket-http2-3-check-http3-stream-id stream-id)
   (%websocket-http2-3-check-http3-max-frame-size max-frame-size)
   (%websocket-validate-limit max-header-block-bytes "MAX-HEADER-BLOCK-BYTES")
-  (let ((block (encode-websocket-http3-headers
-                headers stream-id
-                :context context
-                :request-p request-p
-                :trailers-p trailers-p
-                :huffman-p huffman-p
-                :max-header-bytes max-header-block-bytes)))
+  (multiple-value-bind (block transaction)
+      (%websocket-http3-prepare-header-block
+       headers stream-id context request-p trailers-p huffman-p
+       max-header-block-bytes)
     (when (> (length block) max-header-block-bytes)
       (%websocket-size-error
        "An HTTP/3 header block exceeded its selected size limit."
@@ -911,9 +912,22 @@
       (%websocket-http2-3-fail
        "The HTTP/3 WebSocket HEADERS block exceeds the selected frame size."
        :detail (length block)))
-    (%websocket-http2-3-encode-http3-frame
-     http-kit/http3:+http3-headers-type+
-     block)))
+    (values
+     (%websocket-http2-3-encode-http3-frame
+      http-kit/http3:+http3-headers-type+
+      block)
+     transaction)))
+
+(defun encode-websocket-http3-headers-frame
+    (headers stream-id &key context (request-p t) trailers-p huffman-p
+                         (max-frame-size +websocket-http3-default-max-frame-size+)
+                         (max-header-block-bytes +websocket-default-max-header-bytes+))
+  (multiple-value-bind (wire transaction)
+      (%websocket-http3-prepare-headers-frame
+       headers stream-id context request-p trailers-p huffman-p
+       max-frame-size max-header-block-bytes)
+    (http-message-kit:qpack-commit-encoding transaction)
+    wire))
 
 (defun decode-websocket-http3-headers-frame
     (octets &key context (request-p t) trailers-p expected-stream-id
@@ -1114,11 +1128,11 @@
              "HTTP/3 ENABLE_CONNECT_PROTOCOL must be 0 or 1."
              :detail (cdr entry)))))
       (dolist (entry (list
-                      (assoc http-kit/http3:+http3-setting-qpack-max-table-capacity+
+                      (assoc +websocket-http3-setting-qpack-max-table-capacity+
                              settings)
-                      (assoc http-kit/http3:+http3-setting-max-field-section-size+
+                      (assoc +websocket-http3-setting-max-field-section-size+
                              settings)
-                      (assoc http-kit/http3:+http3-setting-qpack-blocked-streams+
+                      (assoc +websocket-http3-setting-qpack-blocked-streams+
                              settings)))
         (when (and entry
                    (or (not (integerp (cdr entry)))

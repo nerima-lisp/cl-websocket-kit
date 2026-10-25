@@ -415,9 +415,9 @@
                           (websocket-connection-stream accepted)
                           :payload
                           (websocket-frame-payload frame))
-                         (return))))
+                         (return)))))
             (close-websocket-connection accepted :send-close-p nil))
-        (values nil received received-masks))
+          (values nil received received-masks))
       (error (condition)
         (values condition nil nil))))
 
@@ -508,7 +508,7 @@
               (ignore-errors (uiop:terminate-process socat-process))
               (ignore-errors (uiop:wait-process socat-process)))
             (ignore-errors (delete-file certificate))
-            (ignore-errors (delete-file key)))))))))
+            (ignore-errors (delete-file key))))))))
 
   (describe "HTTP CONNECT proxy transport"
     (it "uses CONNECT for ws and preserves the explicit target port"

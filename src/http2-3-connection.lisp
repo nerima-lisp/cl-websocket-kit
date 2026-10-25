@@ -12,12 +12,15 @@
   trailers
   local-end-p
   remote-end-p
+  remote-fin-pending-p
   send-window
   receive-window
   unconsumed-receive-bytes
   inbound-frames
   inbound-frame-tail
   wire-buffer
+  blocked-header-token
+  blocked-header-trailers-p
   headers-seen-p
   established-p
   request-p)
@@ -42,6 +45,7 @@
   h3-qpack-huffman-p
   h3-qpack-encoder-table
   h3-qpack-decoder-table
+  h3-qpack-http3-decoder-context
   h3-qpack-encoder-stream-id
   h3-qpack-decoder-stream-id
   h3-qpack-peer-encoder-stream-id
@@ -320,7 +324,7 @@
 (defun %websocket-http2-3-connection-peer-http3-field-section-size
     (connection)
   (let ((setting
-          (assoc http-kit/http3:+http3-setting-max-field-section-size+
+          (assoc +websocket-http3-setting-max-field-section-size+
                  (websocket-http2-3-connection-peer-settings connection))))
     (if setting
         (min (websocket-http2-3-connection-max-header-block-bytes connection)
@@ -408,13 +412,13 @@
         (cons +websocket-http2-enable-connect-protocol-setting+ 1)))
 
 (defun %websocket-http2-3-connection-local-http3-settings (connection)
-  (list (cons http-kit/http3:+http3-setting-qpack-max-table-capacity+
+  (list (cons +websocket-http3-setting-qpack-max-table-capacity+
               (websocket-http2-3-connection-h3-qpack-max-table-capacity
                connection))
-        (cons http-kit/http3:+http3-setting-max-field-section-size+
+        (cons +websocket-http3-setting-max-field-section-size+
               (websocket-http2-3-connection-h3-max-field-section-size
                connection))
-        (cons http-kit/http3:+http3-setting-qpack-blocked-streams+
+        (cons +websocket-http3-setting-qpack-blocked-streams+
               (websocket-http2-3-connection-h3-qpack-blocked-streams
                connection))
         (cons +websocket-http3-enable-connect-protocol-setting+ 1)))
@@ -863,30 +867,28 @@
 (defun %websocket-http2-3-connection-open-stream-headers
     (connection headers stream-id request-p end-stream-p)
   (if (eq (websocket-http2-3-connection-protocol connection) :http2)
-      (encode-websocket-http2-headers-frames
+      (values
+       (encode-websocket-http2-headers-frames
+        headers stream-id
+        :request-p request-p
+        :end-stream-p end-stream-p
+        :context
+        (websocket-http2-3-connection-hpack-encoder-context connection)
+        :huffman-p
+        (websocket-http2-3-connection-hpack-huffman-p connection)
+        :max-frame-size
+        (%websocket-http2-3-connection-effective-frame-size connection)
+        :max-header-block-bytes
+        (websocket-http2-3-connection-max-header-block-bytes connection)
+        :max-continuation-frames
+        (websocket-http2-3-connection-max-continuation-frames connection))
+       nil)
+      (%websocket-http3-prepare-headers-frame
        headers stream-id
-       :request-p request-p
-       :end-stream-p end-stream-p
-       :context
-       (websocket-http2-3-connection-hpack-encoder-context connection)
-       :huffman-p
-       (websocket-http2-3-connection-hpack-huffman-p connection)
-       :max-frame-size
-       (%websocket-http2-3-connection-effective-frame-size connection)
-       :max-header-block-bytes
-       (websocket-http2-3-connection-max-header-block-bytes connection)
-       :max-continuation-frames
-       (websocket-http2-3-connection-max-continuation-frames connection))
-      (encode-websocket-http3-headers-frame
-       headers stream-id
-       :request-p request-p
-       :context
        (websocket-http2-3-connection-h3-qpack-encoder-table connection)
-       :huffman-p
+       request-p nil
        (websocket-http2-3-connection-h3-qpack-huffman-p connection)
-       :max-frame-size
        (%websocket-http2-3-connection-effective-frame-size connection)
-       :max-header-block-bytes
        (%websocket-http2-3-connection-peer-http3-field-section-size
         connection))))
 
@@ -1569,14 +1571,14 @@
 
 (defun %websocket-http2-3-connection-process-http3-qpack-encoder-wire
     (connection)
-  (let ((buffer (websocket-http2-3-connection-h3-qpack-encoder-wire-buffer
-                connection))
-        (table (websocket-http2-3-connection-h3-qpack-decoder-table
-                connection)))
+  (let ((buffer
+          (websocket-http2-3-connection-h3-qpack-encoder-wire-buffer
+           connection))
+        (context
+          (websocket-http2-3-connection-h3-qpack-decoder-table connection)))
     (loop while (plusp (fill-pointer buffer)) do
       (multiple-value-bind (status end)
-          (%websocket-http2-3-connection-qpack-encoder-instruction-end
-           buffer)
+          (%websocket-http2-3-connection-qpack-encoder-instruction-end buffer)
         (case status
           (:incomplete (return connection))
           (:invalid
@@ -1586,8 +1588,8 @@
            (let ((instruction (subseq buffer 0 end)))
              (multiple-value-bind (events consumed)
                  (handler-case
-                     (http-kit/http3:qpack-process-encoder-stream
-                      table instruction)
+                     (http-message-kit:qpack-decode-encoder-stream
+                      context instruction)
                    (error (condition)
                      (%websocket-http2-3-fail
                       "An HTTP/3 QPACK encoder instruction was rejected."
@@ -1602,17 +1604,21 @@
                      (append
                       (websocket-http2-3-connection-h3-qpack-encoder-events
                        connection)
-                      events))))))))
+                      events))
+               (%websocket-http2-3-connection-resume-ready-http3-header-sections
+                connection)))))))
     connection))
 
 (defun %websocket-http2-3-connection-process-http3-qpack-decoder-wire
     (connection)
-  (let ((buffer (websocket-http2-3-connection-h3-qpack-decoder-wire-buffer
-                connection)))
+  (let ((buffer
+          (websocket-http2-3-connection-h3-qpack-decoder-wire-buffer
+           connection))
+        (context
+          (websocket-http2-3-connection-h3-qpack-encoder-table connection)))
     (loop while (plusp (fill-pointer buffer)) do
       (multiple-value-bind (status end)
-          (%websocket-http2-3-connection-qpack-decoder-instruction-end
-           buffer)
+          (%websocket-http2-3-connection-qpack-decoder-instruction-end buffer)
         (case status
           (:incomplete (return connection))
           (:invalid
@@ -1622,7 +1628,8 @@
            (let ((instruction (subseq buffer 0 end)))
              (multiple-value-bind (events consumed)
                  (handler-case
-                     (http-kit/http3:qpack-process-decoder-stream instruction)
+                     (http-message-kit:qpack-decode-decoder-stream
+                      context instruction)
                    (error (condition)
                      (%websocket-http2-3-fail
                       "An HTTP/3 QPACK decoder instruction was rejected."
@@ -1663,6 +1670,29 @@
    (websocket-http2-3-connection-max-buffered-wire-bytes connection)
    "HTTP/3 QPACK decoder buffering exceeds the configured limit.")
   (%websocket-http2-3-connection-process-http3-qpack-decoder-wire connection))
+(progn
+  (defun %websocket-http2-3-connection-close-http3-qpack-context
+      (connection)
+    (let ((context
+            (websocket-http2-3-connection-h3-qpack-http3-decoder-context
+             connection)))
+      (when context
+        (http-message-kit:qpack-close-http3-decoder-context context))
+      (setf (websocket-http2-3-connection-h3-qpack-http3-decoder-context
+             connection)
+            nil)
+      connection))
+
+  (defun %websocket-http2-3-connection-discard-http3-qpack-state
+      (connection)
+    (%websocket-http2-3-connection-close-http3-qpack-context connection)
+    (setf (websocket-http2-3-connection-h3-qpack-encoder-table connection)
+          nil
+          (websocket-http2-3-connection-h3-qpack-decoder-table connection)
+          nil
+          (websocket-http2-3-connection-closed-p connection)
+          t)
+    (%websocket-http2-3-connection-call-close connection t)))
 
 (defun %websocket-http2-3-connection-send-http3-qpack-wire
     (connection octets encoder-p)
@@ -1673,23 +1703,29 @@
     (%websocket-http2-3-connection-qpack-wire-complete-p
      wire
      (if encoder-p
-         #'%websocket-http2-3-connection-qpack-encoder-instruction-end
-         #'%websocket-http2-3-connection-qpack-decoder-instruction-end)
+         (function %websocket-http2-3-connection-qpack-encoder-instruction-end)
+         (function %websocket-http2-3-connection-qpack-decoder-instruction-end))
      (if encoder-p
          "An HTTP/3 QPACK encoder instruction stream ended mid-instruction."
          "An HTTP/3 QPACK decoder instruction stream ended mid-instruction."))
     (if encoder-p
-        (multiple-value-bind (events consumed)
-            (handler-case
-                (http-kit/http3:qpack-process-encoder-stream
+        (let ((events nil)
+              (consumed nil))
+          (handler-case
+              (multiple-value-setq (events consumed)
+                (http-message-kit:qpack-decode-encoder-stream
                  (websocket-http2-3-connection-h3-qpack-encoder-table
                   connection)
-                 wire)
-              (error (condition)
-                (%websocket-http2-3-fail
-                 "An HTTP/3 local QPACK encoder instruction was rejected."
-                 :detail condition)))
+                 wire))
+            (error (condition)
+              (%websocket-http2-3-connection-discard-http3-qpack-state
+               connection)
+              (%websocket-http2-3-fail
+               "An HTTP/3 local QPACK encoder instruction was rejected."
+               :detail condition)))
           (unless (= consumed (length wire))
+            (%websocket-http2-3-connection-discard-http3-qpack-state
+             connection)
             (%websocket-http2-3-fail
              "An HTTP/3 local QPACK encoder instruction was not fully consumed."))
           (setf (websocket-http2-3-connection-h3-qpack-encoder-events connection)
@@ -1697,50 +1733,78 @@
                  (websocket-http2-3-connection-h3-qpack-encoder-events
                   connection)
                  events)))
-        (multiple-value-bind (events consumed)
-            (handler-case
-                (http-kit/http3:qpack-process-decoder-stream wire)
-              (error (condition)
-                (%websocket-http2-3-fail
-                 "An HTTP/3 local QPACK decoder instruction was rejected."
-                 :detail condition)))
-          (unless (= consumed (length wire))
-            (%websocket-http2-3-fail
-             "An HTTP/3 local QPACK decoder instruction was not fully consumed."))
+        (let ((buffer (%websocket-http2-3-connection-copy-octets wire))
+              (events nil))
+          (loop while (plusp (fill-pointer buffer)) do
+            (let* ((first (aref buffer 0))
+                   (prefix-bits (if (not (zerop (logand first #x80))) 7 6)))
+              (multiple-value-bind (status end value)
+                  (%websocket-http2-3-connection-qpack-integer-end
+                   buffer 0 prefix-bits)
+                (unless (eq status :complete)
+                  (%websocket-http2-3-fail
+                   "An HTTP/3 local QPACK decoder instruction was rejected."
+                   :detail status))
+                (push
+                 (cond
+                   ((not (zerop (logand first #x80)))
+                    (list :section-ack value))
+                   ((not (zerop (logand first #x40)))
+                    (list :stream-cancellation value))
+                   ((plusp value)
+                    (list :insert-count-increment value))
+                   (t
+                    (%websocket-http2-3-fail
+                     "An HTTP/3 QPACK insert-count increment must be positive.")))
+                 events)
+                (setf buffer
+                      (%websocket-http2-3-connection-drop-prefix buffer end)))))
           (setf (websocket-http2-3-connection-h3-qpack-decoder-events connection)
                 (append
                  (websocket-http2-3-connection-h3-qpack-decoder-events
                   connection)
-                 events))))
-    (%websocket-http2-3-connection-write
-     connection wire
-     :stream-id
-     (if encoder-p
-         (websocket-http2-3-connection-h3-qpack-encoder-stream-id connection)
-         (websocket-http2-3-connection-h3-qpack-decoder-stream-id connection)))
+                 (nreverse events)))))
+    (handler-case
+        (%websocket-http2-3-connection-write
+         connection wire
+         :stream-id
+         (if encoder-p
+             (websocket-http2-3-connection-h3-qpack-encoder-stream-id connection)
+             (websocket-http2-3-connection-h3-qpack-decoder-stream-id connection)))
+      (error (condition)
+        (%websocket-http2-3-connection-discard-http3-qpack-state
+         connection)
+        (error condition)))
     wire))
 
 (defun %websocket-http2-3-connection-set-http3-qpack-encoder-capacity
     (connection capacity)
-  (let* ((table (websocket-http2-3-connection-h3-qpack-encoder-table
-                 connection))
+  (let* ((context
+           (websocket-http2-3-connection-h3-qpack-encoder-table connection))
          (target
            (min capacity
-                (http-kit/http3:qpack-dynamic-table-max-capacity table)))
-         (current (http-kit/http3:qpack-dynamic-table-capacity table)))
+                (http-message-kit:qpack-context-max-table-capacity context)))
+         (current (http-message-kit:qpack-context-table-capacity context)))
     (unless (= current target)
-      (let ((wire
-              (http-kit/http3:qpack-encode-set-dynamic-table-capacity target)))
+      (multiple-value-bind (wire transaction)
+          (http-message-kit:qpack-prepare-set-capacity context target)
         (handler-case
-            (http-kit/http3:qpack-dynamic-table-set-capacity table target)
+            (%websocket-http2-3-connection-write
+             connection wire
+             :stream-id
+             (websocket-http2-3-connection-h3-qpack-encoder-stream-id
+              connection))
           (error (condition)
-            (%websocket-http2-3-fail
-             "An HTTP/3 QPACK encoder capacity update was rejected."
-             :detail condition)))
-        (%websocket-http2-3-connection-write
-         connection wire
-         :stream-id
-         (websocket-http2-3-connection-h3-qpack-encoder-stream-id connection))
+            (http-message-kit:qpack-abort-encoding transaction)
+            (%websocket-http2-3-connection-discard-http3-qpack-state
+             connection)
+            (error condition)))
+        (handler-case
+            (http-message-kit:qpack-commit-encoding transaction)
+          (error (condition)
+            (%websocket-http2-3-connection-discard-http3-qpack-state
+             connection)
+            (error condition)))
         wire))))
 
 (defun websocket-http3-connection-send-qpack-encoder-instructions
@@ -1800,16 +1864,16 @@
         (declare (ignore ignored))
         (let ((qpack-capacity
                 (or (cdr (assoc
-                          http-kit/http3:+http3-setting-qpack-max-table-capacity+
+                          +websocket-http3-setting-qpack-max-table-capacity+
                           settings))
                     0))
               (max-field-section-size
                 (cdr (assoc
-                      http-kit/http3:+http3-setting-max-field-section-size+
+                      +websocket-http3-setting-max-field-section-size+
                       settings)))
               (blocked-streams
                 (or (cdr (assoc
-                          http-kit/http3:+http3-setting-qpack-blocked-streams+
+                          +websocket-http3-setting-qpack-blocked-streams+
                           settings))
                     0)))
           (setf (websocket-http2-3-connection-peer-settings connection) settings
@@ -1849,29 +1913,57 @@
                 value))))
     t))
 
-(defun %websocket-http2-3-connection-h3-accept-header
-    (connection stream frame)
-  (multiple-value-bind (headers used ignored)
-      (decode-websocket-http3-headers-frame
-       frame
-       :expected-stream-id (websocket-http2-3-stream-id stream)
-       :context
-       (websocket-http2-3-connection-h3-qpack-decoder-table connection)
-       :request-p (eq (websocket-http2-3-connection-role connection) :server)
-       :max-frame-size
-       (websocket-http2-3-connection-max-frame-size connection)
-       :max-header-block-bytes
-       (%websocket-http2-3-connection-local-http3-field-section-size
-        connection))
-    (declare (ignore ignored))
-    (unless (= used (length frame))
-      (%websocket-http2-3-fail
-       "An HTTP/3 HEADERS frame contained trailing bytes."))
-    (%websocket-http2-3-connection-accept-header-section
-     connection stream headers
-     (eq (websocket-http2-3-connection-role connection) :server)
-     (websocket-http2-3-stream-established-p stream)
-     nil)))
+(progn
+  (defun %websocket-http2-3-connection-h3-decode-header-frame
+      (connection stream frame trailers-p)
+    (multiple-value-bind (type payload used)
+        (%websocket-http2-3-decode-http3-frame
+         frame :max-payload-bytes
+         (websocket-http2-3-connection-max-frame-size connection))
+      (unless (= type http-kit/http3:+http3-headers-type+)
+        (%websocket-http2-3-fail
+         "The HTTP/3 WebSocket header sequence must contain a HEADERS frame."))
+      (unless (= used (length frame))
+        (%websocket-http2-3-fail
+         "An HTTP/3 HEADERS frame contained trailing bytes."))
+      (let* ((role
+               (cond
+                 (trailers-p :trailers)
+                 ((eq (websocket-http2-3-connection-role connection) :server)
+                  :request)
+                 (t :response)))
+             (request-p (eq role :request))
+             (result
+               (http-message-kit:qpack-decode-http3-field-section
+                payload
+                (websocket-http2-3-connection-h3-qpack-http3-decoder-context
+                 connection)
+                (websocket-http2-3-stream-id stream)
+                :role role
+                :serialize (lambda (thunk) (funcall thunk))
+                :on-section-acknowledgment
+                (lambda (ack-stream-id)
+                  (%websocket-http2-3-connection-send-http3-qpack-wire
+                   connection
+                   (http-message-kit:qpack-encode-section-ack ack-stream-id)
+                   nil))
+                :max-header-bytes
+                (%websocket-http2-3-connection-local-http3-field-section-size
+                 connection)
+                :max-fields 256)))
+        (if (http-message-kit:qpack-blocked-stream-p result)
+            (setf (websocket-http2-3-stream-blocked-header-token stream)
+                  result
+                  (websocket-http2-3-stream-blocked-header-trailers-p stream)
+                  trailers-p)
+            (%websocket-http2-3-connection-accept-header-section
+             connection stream (%websocket-http2-3-pairs->headers result)
+             request-p trailers-p nil))))
+    stream)
+  (defun %websocket-http2-3-connection-h3-accept-header
+      (connection stream frame)
+    (%websocket-http2-3-connection-h3-decode-header-frame
+     connection stream frame nil)))
 
 (defun %websocket-http2-3-connection-h3-process-stream-frame
     (connection stream frame)
@@ -1888,26 +1980,8 @@
                (%websocket-http2-3-fail
                 "An HTTP/3 stream received trailers after END_STREAM."
                 :detail stream))
-             (multiple-value-bind (headers ignored ignored2)
-                 (decode-websocket-http3-headers-frame
-                  frame :expected-stream-id
-                  (websocket-http2-3-stream-id stream)
-                  :request-p (eq (websocket-http2-3-connection-role connection)
-                                 :server)
-                  :trailers-p t
-                  :context
-                  (websocket-http2-3-connection-h3-qpack-decoder-table
-                   connection)
-                  :max-frame-size
-                  (websocket-http2-3-connection-max-frame-size connection)
-                  :max-header-block-bytes
-                  (%websocket-http2-3-connection-local-http3-field-section-size
-                   connection))
-               (declare (ignore ignored ignored2))
-               (%websocket-http2-3-connection-accept-header-section
-                connection stream headers
-                (eq (websocket-http2-3-connection-role connection) :server)
-                t nil)))
+             (%websocket-http2-3-connection-h3-decode-header-frame
+              connection stream frame t))
            (%websocket-http2-3-connection-h3-accept-header
             connection stream frame)))
       (#.http-kit/http3:+http3-data-type+
@@ -1961,44 +2035,89 @@
      "The HTTP/3 control stream ended with an incomplete frame."))
   connection)
 
-(defun %websocket-http2-3-connection-feed-http3-bidi
-    (connection stream octets &key fin-p)
-  (when (websocket-http2-3-stream-remote-end-p stream)
-    (%websocket-http2-3-fail
-     "An HTTP/3 WebSocket stream received bytes after FIN."
-     :detail (websocket-http2-3-stream-id stream)))
-  (setf (websocket-http2-3-stream-wire-buffer stream)
-        (%websocket-http2-3-connection-append
-         (websocket-http2-3-stream-wire-buffer stream)
-         octets
-         (websocket-http2-3-connection-max-buffered-wire-bytes connection)
-         "An HTTP/3 stream exceeded its buffered-wire limit."))
-  (loop for complete =
-          (multiple-value-list
-           (%websocket-http2-3-connection-h3-frame-complete-p
-            (websocket-http2-3-stream-wire-buffer stream)))
-        while (first complete)
-        do (let* ((buffer (websocket-http2-3-stream-wire-buffer stream))
-                  (end (fourth complete))
-                  (frame (subseq buffer 0 end)))
-             (setf (websocket-http2-3-stream-wire-buffer stream)
-                   (%websocket-http2-3-connection-drop-prefix buffer end))
-             (unless (websocket-http2-3-stream-headers-seen-p stream)
-               (unless (= (first complete) http-kit/http3:+http3-headers-type+)
-                 (%websocket-http2-3-fail
-                  "The first HTTP/3 WebSocket stream frame must be HEADERS.")))
-             (%websocket-http2-3-connection-h3-process-stream-frame
-              connection stream frame)))
-  (when (and fin-p
-             (plusp (fill-pointer (websocket-http2-3-stream-wire-buffer stream))))
-    (%websocket-http2-3-fail
-     "An HTTP/3 WebSocket stream ended with an incomplete frame."))
-  (when fin-p
-    (unless (websocket-http2-3-stream-headers-seen-p stream)
+(progn
+  (defun %websocket-http2-3-connection-feed-http3-bidi
+      (connection stream octets &key fin-p)
+    (when (or (websocket-http2-3-stream-remote-end-p stream)
+              (and (websocket-http2-3-stream-remote-fin-pending-p stream)
+                   (or fin-p (plusp (length octets)))))
       (%websocket-http2-3-fail
-       "An HTTP/3 WebSocket stream ended before its HEADERS."))
-    (setf (websocket-http2-3-stream-remote-end-p stream) t))
-  stream)
+       "An HTTP/3 WebSocket stream received bytes after FIN."
+       :detail (websocket-http2-3-stream-id stream)))
+    (when fin-p
+      (setf (websocket-http2-3-stream-remote-fin-pending-p stream) t))
+    (setf (websocket-http2-3-stream-wire-buffer stream)
+          (%websocket-http2-3-connection-append
+           (websocket-http2-3-stream-wire-buffer stream)
+           octets
+           (websocket-http2-3-connection-max-buffered-wire-bytes connection)
+           "An HTTP/3 stream exceeded its buffered-wire limit."))
+    (loop for complete =
+            (multiple-value-list
+             (%websocket-http2-3-connection-h3-frame-complete-p
+              (websocket-http2-3-stream-wire-buffer stream)))
+          while (and (null (websocket-http2-3-stream-blocked-header-token stream))
+                     (first complete))
+          do (let* ((buffer (websocket-http2-3-stream-wire-buffer stream))
+                    (end (fourth complete))
+                    (frame (subseq buffer 0 end)))
+               (setf (websocket-http2-3-stream-wire-buffer stream)
+                     (%websocket-http2-3-connection-drop-prefix buffer end))
+               (unless (websocket-http2-3-stream-headers-seen-p stream)
+                 (unless (= (first complete) http-kit/http3:+http3-headers-type+)
+                   (%websocket-http2-3-fail
+                    "The first HTTP/3 WebSocket stream frame must be HEADERS.")))
+               (%websocket-http2-3-connection-h3-process-stream-frame
+                connection stream frame)))
+    (unless (websocket-http2-3-stream-blocked-header-token stream)
+      (when (websocket-http2-3-stream-remote-fin-pending-p stream)
+        (when (plusp (fill-pointer (websocket-http2-3-stream-wire-buffer stream)))
+          (%websocket-http2-3-fail
+           "An HTTP/3 WebSocket stream ended with an incomplete frame."))
+        (unless (websocket-http2-3-stream-headers-seen-p stream)
+          (%websocket-http2-3-fail
+           "An HTTP/3 WebSocket stream ended before its HEADERS."))
+        (setf (websocket-http2-3-stream-remote-fin-pending-p stream) nil
+              (websocket-http2-3-stream-remote-end-p stream) t)))
+    stream)
+
+  (defun %websocket-http2-3-connection-resume-ready-http3-header-sections
+      (connection)
+    (let ((context
+            (websocket-http2-3-connection-h3-qpack-http3-decoder-context
+             connection)))
+      (when context
+        (dolist (token (http-message-kit:qpack-take-ready-streams context))
+          (let ((stream nil))
+            (maphash
+             (lambda (stream-id candidate)
+               (declare (ignore stream-id))
+               (when (eq token
+                         (websocket-http2-3-stream-blocked-header-token candidate))
+                 (setf stream candidate)))
+             (websocket-http2-3-connection-streams connection))
+            (unless stream
+              (%websocket-http2-3-fail
+               "A ready HTTP/3 QPACK field section has no blocked stream."))
+            (let ((trailers-p
+                    (websocket-http2-3-stream-blocked-header-trailers-p stream)))
+              (setf (websocket-http2-3-stream-blocked-header-token stream) nil
+                    (websocket-http2-3-stream-blocked-header-trailers-p stream) nil)
+              (let ((fields
+                      (handler-case
+                          (http-message-kit:qpack-resume-blocked-stream token)
+                        (error (condition)
+                          (%websocket-http2-3-fail
+                           "A blocked HTTP/3 QPACK field section was rejected."
+                           :detail condition)))))
+                (%websocket-http2-3-connection-accept-header-section
+                 connection stream (%websocket-http2-3-pairs->headers fields)
+                 (eq (websocket-http2-3-connection-role connection) :server)
+                 trailers-p nil))
+              (%websocket-http2-3-connection-feed-http3-bidi
+               connection stream
+               (%websocket-http2-3-connection-empty-buffer))))))
+    connection)))
 
 (defun %websocket-http2-3-connection-start-http2 (connection)
   (setf (websocket-http2-3-connection-local-settings connection)
@@ -2039,39 +2158,50 @@
             (%websocket-http2-3-connection-start-http2 connection)
             (%websocket-http2-3-connection-start-http3 connection))
       (error (condition)
-        (setf (websocket-http2-3-connection-closed-p connection) t)
+        (if (eq (websocket-http2-3-connection-protocol connection) :http3)
+            (%websocket-http2-3-connection-discard-http3-qpack-state connection)
+            (setf (websocket-http2-3-connection-closed-p connection) t))
         (error condition))))
   connection)
 
 (defun %websocket-http2-3-connection-prepare-http3-qpack-tables
-    (encoder-table decoder-table qpack-max-table-capacity)
+    (encoder-context decoder-context qpack-max-table-capacity qpack-blocked-streams
+     qpack-huffman-p)
   (let ((encoder
-          (or encoder-table
-              (http-kit/http3:make-qpack-dynamic-table
-               :max-capacity
+          (or encoder-context
+              (http-message-kit:make-qpack-context
+               :max-table-capacity
                +websocket-http3-default-qpack-encoder-table-capacity+
-               :capacity 0)))
+               :table-capacity 0
+               :max-blocked-streams qpack-blocked-streams
+               :huffman qpack-huffman-p)))
         (decoder
-          (or decoder-table
-              (http-kit/http3:make-qpack-dynamic-table
-               :max-capacity qpack-max-table-capacity
-               :capacity qpack-max-table-capacity))))
-    (unless (http-kit/http3:qpack-dynamic-table-p encoder)
+          (or decoder-context
+              (http-message-kit:make-qpack-context
+               :max-table-capacity qpack-max-table-capacity
+               :table-capacity 0
+               :max-blocked-streams qpack-blocked-streams
+               :huffman qpack-huffman-p))))
+    (unless (http-message-kit:qpack-context-p encoder)
       (%websocket-http2-3-fail
-       "QPACK-ENCODER-TABLE must be a QPACK dynamic table." :detail encoder))
-    (unless (http-kit/http3:qpack-dynamic-table-p decoder)
+       "QPACK-ENCODER-TABLE must be a QPACK context."
+       :detail encoder))
+    (unless (http-message-kit:qpack-context-p decoder)
       (%websocket-http2-3-fail
-       "QPACK-DECODER-TABLE must be a QPACK dynamic table." :detail decoder))
+       "QPACK-DECODER-TABLE must be a QPACK context."
+       :detail decoder))
     (when (eq encoder decoder)
       (%websocket-http2-3-fail
-       "QPACK encoder and decoder tables must be distinct." :detail encoder))
-    (when (< (http-kit/http3:qpack-dynamic-table-max-capacity decoder)
+       "QPACK encoder and decoder contexts must be distinct."
+       :detail encoder))
+    (when (< (http-message-kit:qpack-context-max-table-capacity decoder)
              qpack-max-table-capacity)
       (%websocket-http2-3-fail
        "QPACK-DECODER-TABLE cannot represent the advertised capacity."
        :detail decoder))
-    (http-kit/http3:qpack-dynamic-table-set-capacity encoder 0)
-    (http-kit/http3:qpack-dynamic-table-set-capacity
+    (http-message-kit:qpack-context-set-capacity encoder 0)
+    (http-message-kit:qpack-context-set-capacity decoder 0)
+    (http-message-kit:qpack-context-set-max-table-capacity
      decoder qpack-max-table-capacity)
     (values encoder decoder)))
 
@@ -2218,8 +2348,12 @@
      "CLOSE-FUNCTION must be a function or NIL." :detail close-function))
   (multiple-value-bind (encoder-table decoder-table)
       (%websocket-http2-3-connection-prepare-http3-qpack-tables
-       qpack-encoder-table qpack-decoder-table qpack-max-table-capacity)
-    (let* ((local-stream-type (if (eq role :client) 2 3))
+       qpack-encoder-table qpack-decoder-table qpack-max-table-capacity
+       qpack-blocked-streams qpack-huffman-p)
+    (let* ((local-stream-type (if (eq role :client) 2 3)) (http3-decoder-context
+ (http-message-kit:qpack-make-http3-decoder-context
+  decoder-table
+  :max-blocked-streams qpack-blocked-streams))
            (peer-stream-type (if (eq role :client) 3 2))
            (control-id (or h3-control-stream-id local-stream-type))
            (peer-control-id (or h3-peer-control-stream-id peer-stream-type))
@@ -2273,7 +2407,9 @@
      :max-continuation-frames max-continuation-frames
      :h3-qpack-huffman-p qpack-huffman-p
      :h3-qpack-encoder-table encoder-table
-     :h3-qpack-decoder-table decoder-table
+     :h3-qpack-decoder-table
+     decoder-table
+     :h3-qpack-http3-decoder-context http3-decoder-context
      :h3-qpack-encoder-stream-id encoder-stream-id
      :h3-qpack-decoder-stream-id decoder-stream-id
      :h3-qpack-peer-encoder-stream-id peer-encoder-stream-id
@@ -2501,18 +2637,32 @@ ARGS may begin with a header list, or may contain :AUTHORITY, :SCHEME,
              (stream (%websocket-http2-3-connection-make-stream
                       connection stream-id
                       :headers headers
-                      :request-p t))
-             (wire
-               (%websocket-http2-3-connection-open-stream-headers
-                connection headers stream-id t end-stream-p)))
-        (%websocket-http2-3-connection-write
-         connection wire :stream-id stream-id :end-stream-p end-stream-p)
-        (setf (websocket-http2-3-stream-headers-seen-p stream) t
-              (websocket-http2-3-stream-established-p stream) nil
-              (websocket-http2-3-stream-local-end-p stream) end-stream-p)
-        (%websocket-http2-3-connection-create-session
-         stream :initargs session-initargs)
-        stream))))
+                      :request-p t)))
+        (multiple-value-bind (wire transaction)
+            (%websocket-http2-3-connection-open-stream-headers
+             connection headers stream-id t end-stream-p)
+          (handler-case
+              (%websocket-http2-3-connection-write
+               connection wire :stream-id stream-id :end-stream-p end-stream-p)
+            (error (condition)
+              (when transaction
+                (http-message-kit:qpack-abort-encoding transaction)
+                (%websocket-http2-3-connection-discard-http3-qpack-state
+                 connection))
+              (error condition)))
+          (when transaction
+            (handler-case
+                (http-message-kit:qpack-commit-encoding transaction)
+              (error (condition)
+                (%websocket-http2-3-connection-discard-http3-qpack-state
+                 connection)
+                (error condition))))
+          (setf (websocket-http2-3-stream-headers-seen-p stream) t
+                (websocket-http2-3-stream-established-p stream) nil
+                (websocket-http2-3-stream-local-end-p stream) end-stream-p)
+          (%websocket-http2-3-connection-create-session
+           stream :initargs session-initargs)
+          stream)))))
 
 (defun websocket-http2-3-connection-accept-stream
     (connection stream-or-id &rest args)
@@ -2555,11 +2705,25 @@ and :SEND-RESPONSE-P NIL when the application owns the response write."
                        :status status))))
         (%websocket-http2-3-connection-validate-open-headers
          connection headers nil)
-        (%websocket-http2-3-connection-write
-         connection
-         (%websocket-http2-3-connection-open-stream-headers
-          connection headers (websocket-http2-3-stream-id stream) nil nil)
-         :stream-id (websocket-http2-3-stream-id stream))
+        (multiple-value-bind (wire transaction)
+            (%websocket-http2-3-connection-open-stream-headers
+             connection headers (websocket-http2-3-stream-id stream) nil nil)
+          (handler-case
+              (%websocket-http2-3-connection-write
+               connection wire :stream-id (websocket-http2-3-stream-id stream))
+            (error (condition)
+              (when transaction
+                (http-message-kit:qpack-abort-encoding transaction)
+                (%websocket-http2-3-connection-discard-http3-qpack-state
+                 connection))
+              (error condition)))
+          (when transaction
+            (handler-case
+                (http-message-kit:qpack-commit-encoding transaction)
+              (error (condition)
+                (%websocket-http2-3-connection-discard-http3-qpack-state
+                 connection)
+                (error condition)))))
         (setf (websocket-http2-3-stream-established-p stream) t))
       (or (websocket-http2-3-stream-session stream)
           (%websocket-http2-3-connection-create-session
@@ -2732,7 +2896,9 @@ the policy completes."
              (websocket-http2-3-connection-h3-control-stream-id connection))))
       (setf (websocket-http2-3-connection-closed-p connection) t
             (websocket-http2-3-connection-local-end-p connection) t)
-      (%websocket-http2-3-connection-call-close connection nil))
+      (progn
+        (%websocket-http2-3-connection-close-http3-qpack-context connection)
+        (%websocket-http2-3-connection-call-close connection nil)))
     connection))
 
 (defun websocket-http2-3-connection-abort (connection)
@@ -2743,7 +2909,9 @@ the policy completes."
       (setf (websocket-http2-3-connection-closed-p connection) t
             (websocket-http2-3-connection-local-end-p connection) t
             (websocket-http2-3-connection-remote-end-p connection) t)
-      (%websocket-http2-3-connection-call-close connection t))
+      (progn
+        (%websocket-http2-3-connection-close-http3-qpack-context connection)
+        (%websocket-http2-3-connection-call-close connection t)))
     connection))
 
 (defun websocket-http2-session-open-stream (connection &rest args)

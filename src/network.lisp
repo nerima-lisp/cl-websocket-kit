@@ -1354,7 +1354,7 @@ TLS-TRUST-ANCHORS supplies certificates for verifying secure connections."
                             (%websocket-network-proxy-plan
                              proxy input-uri host port))))
       (flet ((open-proxy-stream
-                 (request &key timeout deadline proxy-plan (:proxy transport-proxy)
+                 (request &key timeout deadline proxy-plan ((:proxy transport-proxy))
                           &allow-other-keys)
                (funcall
                 (%websocket-network-proxy-open-stream
