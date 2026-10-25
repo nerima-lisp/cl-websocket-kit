@@ -492,8 +492,7 @@
       (signals websocket-http-error
         (websocket-http3-connection-feed-stream
          connection 3 (octets) :fin-p t))))
-  (it "resumes blocked HTTP/3 headers after buffered encoder instructions arrive" (let* ((writes (list nil))
-           (headers
+   (it "resumes blocked HTTP/3 headers after buffered encoder instructions arrive" (let* ((headers
              (make-websocket-http2-connect-headers
               "example.test"
               :headers (list (make-http-header "x-dynamic" "ready"))))
@@ -528,7 +527,10 @@
               :role :server
               :qpack-max-table-capacity 128
               :qpack-blocked-streams 1
-              :write-function (%connection-test-writer writes))))
+              :write-function
+              (lambda (octets &key stream-id end-stream-p)
+                (declare (ignore stream-id end-stream-p))
+                (length octets)))))
       (expect (plusp (aref section-wire 0)) :to-equalp t)
       (expect (> (length capacity-wire) 1) :to-equalp t)
       (websocket-http3-connection-feed-stream
