@@ -300,6 +300,23 @@
          (websocket-tls-context-provider context)
          :sha256 :aes-128-gcm secret 16 12)))
 
+(defun %websocket-tls-clear-traffic-states (context)
+  (dolist (state-table
+           (list (websocket-tls-context-read-states context)
+                 (websocket-tls-context-write-states context)))
+    (maphash
+     (lambda (key state)
+       (declare (ignore key))
+       (dolist (secret
+                (list (cl-tls-kit:tls13-traffic-state-secret state)
+                      (cl-tls-kit:tls13-traffic-state-key state)
+                      (cl-tls-kit:tls13-traffic-state-iv state)))
+         (when secret
+           (fill secret 0))))
+     state-table)
+    (clrhash state-table))
+  nil)
+
 (defun %websocket-tls-state (context direction level)
   (or (gethash (list direction level)
                (if (eq direction :read)
@@ -562,16 +579,24 @@
                 (%websocket-tls-new-driver
                  provider certificate-chain private-key alpn-protocols)
                 provider)))
-        (%websocket-call-with-deadline
-         (lambda ()
-           (%websocket-tls-run-handshake
-            context stream effective-deadline callback-clock))
-         effective-deadline callback-clock :tls)
-        (values
-         (make-instance 'websocket-tls-stream
-                        :transport stream :context context
-                        :clock-function callback-clock)
-         (websocket-tls-context-alpn context))))))
+        (let ((tls-stream nil))
+          (unwind-protect
+               (progn
+                 (%websocket-call-with-deadline
+                  (lambda ()
+                    (%websocket-tls-run-handshake
+                     context stream effective-deadline callback-clock))
+                  effective-deadline callback-clock :tls)
+                 (setf tls-stream
+                       (make-instance 'websocket-tls-stream
+                                      :transport stream :context context
+                                      :clock-function callback-clock))
+                 (values tls-stream (websocket-tls-context-alpn context)))
+            (unless tls-stream
+              (unwind-protect
+                   (%websocket-tls-clear-traffic-states context)
+                (cl-tls-kit:tls13-server-driver-close
+                 (websocket-tls-context-driver context))))))))))
 
 (defun %websocket-tls-stream-read-buffer-available-p (stream)
   (< (websocket-tls-stream-read-position stream)
@@ -618,7 +643,9 @@
                        (make-array 0 :element-type '(unsigned-byte 8))
                        (websocket-tls-stream-read-position stream) 0)
                  (return nil))
-               (%websocket-tls-fail "The TLS peer sent a fatal alert.")))
+               (progn
+                 (setf (websocket-tls-context-alert context) :peer-fatal-alert)
+                 (%websocket-tls-fail "The TLS peer sent a fatal alert."))))
           (t
            (%websocket-tls-fail
             "The TLS peer sent an invalid TLSInnerPlaintext type."
@@ -722,17 +749,24 @@
 #+sbcl
 (defmethod close ((stream websocket-tls-stream) &key abort)
   (unless (websocket-tls-stream-closed-p stream)
-    (unwind-protect
-         (unless (or abort
-                     (websocket-tls-stream-peer-close-notify-p stream))
-           (let ((context (websocket-tls-stream-context stream)))
+    (let* ((context (websocket-tls-stream-context stream))
+           (abort-p (or abort (websocket-tls-context-alert context))))
+      (unwind-protect
+           (unless (or abort-p
+                       (websocket-tls-stream-peer-close-notify-p stream))
              (when (websocket-tls-context-handshake-complete-p context)
                (%websocket-tls-write-fragment
                 (websocket-tls-stream-transport stream) context
                 cl-tls-kit:+tls-content-type-alert+ #(1 0) :application nil
-                (websocket-tls-stream-clock-function stream)))))
-      (setf (websocket-tls-stream-closed-p stream) t)
-      (close (websocket-tls-stream-transport stream) :abort abort)))
+                (websocket-tls-stream-clock-function stream))))
+        (setf (websocket-tls-stream-closed-p stream) t)
+        (unwind-protect
+             (%websocket-tls-clear-traffic-states context)
+          (unwind-protect
+               (cl-tls-kit:tls13-server-driver-close
+                (websocket-tls-context-driver context))
+            (close (websocket-tls-stream-transport stream)
+                   :abort abort-p))))))
   t)
 
 #-sbcl
