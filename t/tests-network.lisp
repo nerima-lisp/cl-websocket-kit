@@ -160,7 +160,7 @@
                  "Upgrade: websocket"
                  "Connection: Upgrade"
                  "Sec-WebSocket-Version: 12"
-                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="
+                 "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA=="
                  "")
                 client-stream)
                (finish-output client-stream)
