@@ -36,7 +36,7 @@
                        (cl-tls-kit:pem-decode
                         (uiop:read-file-string certificate))))
                     (trust-anchor
-                      (cl-tls-kit:parse-certificate-der
+                      (cl-tls-kit.x509:parse-certificate-der
                        (cl-tls-kit:pem-block-der pem-block))))
                (funcall function certificate key trust-anchor)))
         (dolist (path (list certificate key))
