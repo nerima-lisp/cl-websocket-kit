@@ -188,7 +188,7 @@
              (when server-thread
                (sb-thread:join-thread server-thread)))))))
 
-    (it "closes the TCP transport after peer close_notify"
+    (it "closes the TLS driver and TCP transport after peer close_notify"
       (%tls-test-with-certificate
        (lambda (certificate key trust-anchor)
          (let* ((listener
@@ -199,6 +199,7 @@
                     :certificate certificate :key key)))
                 (server-error nil)
                 (server-transport nil)
+                (server-driver nil)
                 (server-thread nil)
                 (driver nil))
            (unwind-protect
@@ -215,7 +216,11 @@
                                          connection)))
                                  (setf server-transport
                                        (websocket-kit::websocket-tls-stream-transport
-                                        stream))
+                                        stream)
+                                       server-driver
+                                       (websocket-kit::websocket-tls-context-driver
+                                        (websocket-kit::websocket-tls-stream-context
+                                         stream)))
                                  (unless (eq (read-byte stream nil :eof) :eof)
                                    (error "The TLS peer did not send close_notify."))
                                  (close-websocket-connection
@@ -233,7 +238,12 @@
                   (sb-thread:join-thread server-thread)
                   (setf server-thread nil)
                   (expect server-error :to-be nil)
-                  (expect (open-stream-p server-transport) :to-be nil))
+                  (expect (open-stream-p server-transport) :to-be nil)
+                  (multiple-value-bind (closed-driver events)
+                      (cl-tls-kit:tls13-server-driver-step
+                       server-driver #() :level :application)
+                    (declare (ignore closed-driver))
+                    (expect events :to-be nil)))
              (when driver
                (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
              (close-websocket-listener listener)
