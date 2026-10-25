@@ -613,10 +613,12 @@ must return a one-dimensional unsigned-byte vector."
      octets)
    deadline clock-function operation))
 
-(defun %websocket-network-close-stream (stream)
+(defun %websocket-network-close-stream (stream &key (abort-p t))
   (when stream
     (%websocket-with-cleanup
-      (http-kit/network:close-http-tcp-stream stream)))
+      (if abort-p
+          (http-kit/network:close-http-tcp-stream stream)
+          (close stream))))
   nil)
 
 (defparameter +websocket-max-informational-responses+ 16)
@@ -710,11 +712,11 @@ must return a one-dimensional unsigned-byte vector."
       (%websocket-network-close-stream stream)))
   nil)
 
-(defun %websocket-network-force-close-connection (connection)
+(defun %websocket-network-close-connection (connection)
   (when (websocket-connection-p connection)
     (let ((stream (websocket-connection-stream connection)))
       (%websocket-network-mark-closed connection)
-      (%websocket-network-close-stream stream)))
+      (%websocket-network-close-stream stream :abort-p nil)))
   nil)
 
 (defun %websocket-network-output-key-function
@@ -904,8 +906,7 @@ operations on one connection are serialized."
                                         connection
                                         :code close-code
                                         :reason close-reason)
-                                       (%websocket-network-close-stream
-                                        stream)))))
+                                       (%websocket-network-close-stream stream :abort-p nil)))))
                                 (10 nil))))
                      (let ((read-result
                              (catch close-tag
@@ -977,7 +978,7 @@ The stream is closed even when sending the Close frame signals an error."
   (let ((effective-deadline
           (%websocket-effective-deadline timeout deadline clock-function)))
     (if (not send-close-p)
-        (%websocket-network-force-close-connection connection)
+        (%websocket-network-close-connection connection)
         (%websocket-network-with-write-lock (connection)
           (if (websocket-connection-closed-p connection)
               nil
@@ -1013,7 +1014,7 @@ The stream is closed even when sending the Close frame signals an error."
                      :code close-code
                      :reason close-reason
                      :condition failure)
-                    (%websocket-network-close-stream stream))
+                    (%websocket-network-close-stream stream :abort-p (not (null failure))))
                   t)))))))
 
 (defun %websocket-tls-package ()

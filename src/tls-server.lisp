@@ -5,9 +5,11 @@
 (defconstant +websocket-tls-maximum-certificate-count+ 16)
 
 (defstruct (websocket-tls-context
-             (:constructor %make-websocket-tls-context (driver provider)))
+             (:constructor %make-websocket-tls-context
+                 (driver provider ticket-key-store)))
   driver
   provider
+  ticket-key-store
   suite
   alpn
   alert
@@ -442,11 +444,10 @@
     pending))
 
 (defun %websocket-tls-read-record
-    (transport deadline clock-function operation)
+    (transport context deadline clock-function operation)
   (let* ((header (%websocket-network-read-octets
                   transport 5 deadline clock-function operation))
          (content-type (aref header 0))
-         (version (+ (ash (aref header 1) 8) (aref header 2)))
          (length (+ (ash (aref header 3) 8) (aref header 4)))
          (maximum
            (case content-type
@@ -456,41 +457,45 @@
              (23 cl-tls-kit:+tls-ciphertext-limit+)
              (t (%websocket-tls-fail
                  "The TLS peer sent an invalid record content type."
-                 content-type))))
-         (allowed-version-p
-           (or (= version cl-tls-kit:+tls-record-version+)
-               (and (= content-type cl-tls-kit:+tls-content-type-handshake+)
-                    (= version #x0301)))))
-    (unless allowed-version-p
-      (%websocket-tls-fail "The TLS peer sent an invalid record version."
-                           version))
+                 content-type)))))
     (when (> length maximum)
+      (let ((level
+              (cond
+                ((websocket-tls-context-handshake-complete-p context)
+                 :application)
+                ((gethash (list :write :handshake)
+                          (websocket-tls-context-write-states context))
+                 :handshake)
+                (t :initial))))
+        (%websocket-tls-write-fragment
+         transport context cl-tls-kit:+tls-content-type-alert+ #(2 22)
+         level deadline clock-function))
       (%websocket-tls-fail "The TLS peer sent an oversized record." length))
     (when (or (and (member content-type '(20 21 22)) (zerop length))
               (and (= content-type 21) (< length 2))
               (and (= content-type 20) (/= length 1))
               (and (= content-type 23) (< length 17)))
-      (%websocket-tls-fail "The TLS peer sent a malformed record." content-type))
+      (%websocket-tls-fail
+       "The TLS peer sent a malformed record." content-type))
     (let* ((fragment (%websocket-network-read-octets
                       transport length deadline clock-function operation))
            (wire (concatenate '(vector (unsigned-byte 8)) header fragment)))
-      (values content-type version fragment wire))))
+      (values content-type fragment wire))))
 
 (defun %websocket-tls-run-handshake
     (context transport deadline clock-function)
   (let ((handshake-buffer (make-array 0
-              :element-type '(unsigned-byte 8)
-              :adjustable t
-              :fill-pointer 0))
+                                      :element-type '(unsigned-byte 8)
+                                      :adjustable t
+                                      :fill-pointer 0))
         (compatibility-ccs-count 0))
     (loop until (websocket-tls-context-handshake-complete-p context)
-          do (multiple-value-bind (content-type version fragment wire)
+          do (multiple-value-bind (content-type fragment wire)
                  (%websocket-tls-read-record
-                  transport deadline clock-function :tls)
+                  transport context deadline clock-function :tls)
                (cond
                  ((= content-type 20)
-                  (unless (and (= version cl-tls-kit:+tls-record-version+)
-                               (= (aref fragment 0) 1)
+                  (unless (and (= (aref fragment 0) 1)
                                (< compatibility-ccs-count 1))
                     (%websocket-tls-fail
                      "The TLS peer sent an invalid compatibility CCS."))
@@ -501,9 +506,6 @@
                          context transport handshake-buffer fragment :initial
                          deadline clock-function)))
                  ((= content-type cl-tls-kit:+tls-content-type-application-data+)
-                  (unless (= version cl-tls-kit:+tls-record-version+)
-                    (%websocket-tls-fail
-                     "An encrypted TLS record has an invalid version." version))
                   (let* ((state (%websocket-tls-state context :read :handshake))
                          (plaintext
                            (cl-tls-kit:decrypt-tls13-traffic-record wire state))
@@ -529,12 +531,14 @@
                    content-type))))))
   nil)
 
-(defun %websocket-tls-new-driver (provider certificate-chain private-key alpn)
+(defun %websocket-tls-new-driver
+    (provider certificate-chain private-key alpn ticket-key-store)
   (cl-tls-kit:make-tls13-server-driver
    :provider provider
    :certificate-chain certificate-chain
    :private-key private-key
    :alpn-protocols alpn
+   :ticket-key-store ticket-key-store
    :cipher-suites #(#x1301)))
 
 (defun %websocket-make-tls-server-wrapper
@@ -566,7 +570,19 @@
          (private-key (%websocket-tls-private-key key password)))
     (unless (functionp clock)
       (%websocket-protocol-error "TLS CLOCK-FUNCTION must be callable." clock))
-    (%websocket-tls-new-driver provider certificate-chain private-key alpn-protocols)
+    (let ((ticket-key-store
+            (cl-tls-kit:make-tls13-server-ticket-key-store))
+          (driver nil))
+      (unwind-protect
+           (setf driver
+                 (%websocket-tls-new-driver
+                  provider certificate-chain private-key alpn-protocols
+                  ticket-key-store))
+        (unwind-protect
+             (when driver
+               (cl-tls-kit:tls13-server-driver-close driver))
+          (cl-tls-kit:destroy-tls13-server-ticket-key-store
+           ticket-key-store))))
     (lambda (stream &key timeout deadline clock-function &allow-other-keys)
       (unless (streamp stream)
         (%websocket-protocol-error "TLS upgrade requires a Lisp stream." stream))
@@ -574,14 +590,18 @@
              (effective-deadline
                (%websocket-effective-deadline
                 timeout deadline callback-clock))
-             (context
-               (%make-websocket-tls-context
-                (%websocket-tls-new-driver
-                 provider certificate-chain private-key alpn-protocols)
-                provider)))
+             (ticket-key-store
+               (cl-tls-kit:make-tls13-server-ticket-key-store))
+             (context nil))
         (let ((tls-stream nil))
           (unwind-protect
                (progn
+                 (setf context
+                       (%make-websocket-tls-context
+                        (%websocket-tls-new-driver
+                         provider certificate-chain private-key alpn-protocols
+                         ticket-key-store)
+                        provider ticket-key-store))
                  (%websocket-call-with-deadline
                   (lambda ()
                     (%websocket-tls-run-handshake
@@ -594,9 +614,14 @@
                  (values tls-stream (websocket-tls-context-alpn context)))
             (unless tls-stream
               (unwind-protect
-                   (%websocket-tls-clear-traffic-states context)
-                (cl-tls-kit:tls13-server-driver-close
-                 (websocket-tls-context-driver context))))))))))
+                   (when context
+                     (%websocket-tls-clear-traffic-states context))
+                (unwind-protect
+                     (when context
+                       (cl-tls-kit:tls13-server-driver-close
+                        (websocket-tls-context-driver context)))
+                  (cl-tls-kit:destroy-tls13-server-ticket-key-store
+                   ticket-key-store))))))))))
 
 (defun %websocket-tls-stream-read-buffer-available-p (stream)
   (< (websocket-tls-stream-read-position stream)
@@ -607,49 +632,51 @@
     (when (or (websocket-tls-stream-closed-p stream)
               (websocket-tls-stream-peer-close-notify-p stream))
       (return nil))
-    (multiple-value-bind (content-type version fragment wire)
-        (%websocket-tls-read-record
-         (websocket-tls-stream-transport stream) nil
-         (websocket-tls-stream-clock-function stream) :tls)
-      (declare (ignore version fragment))
-      (unless (= content-type cl-tls-kit:+tls-content-type-application-data+)
-        (%websocket-tls-fail
-         "The TLS peer sent unencrypted data after the handshake." content-type))
-      (let* ((context (websocket-tls-stream-context stream))
-             (state (%websocket-tls-state context :read :application))
-             (plaintext (cl-tls-kit:decrypt-tls13-traffic-record wire state))
-             (inner-type (cl-tls-kit:tls-plaintext-content-type plaintext))
-             (inner-fragment (cl-tls-kit:tls-plaintext-fragment plaintext)))
-        (cond
-          ((= inner-type cl-tls-kit:+tls-content-type-application-data+)
-           (cl-tls-kit:tls13-server-driver-note-application-data-received
-            (websocket-tls-context-driver context))
-           (setf (websocket-tls-stream-read-buffer stream) inner-fragment
-                 (websocket-tls-stream-read-position stream) 0)
-           (when (plusp (length inner-fragment))
-             (return t)))
-          ((= inner-type cl-tls-kit:+tls-content-type-handshake+)
-           (unless (cl-tls-kit:tls-key-update-p plaintext)
+    (let ((context (websocket-tls-stream-context stream)))
+      (multiple-value-bind (content-type fragment wire)
+          (%websocket-tls-read-record
+           (websocket-tls-stream-transport stream) context nil
+           (websocket-tls-stream-clock-function stream) :tls)
+        (declare (ignore fragment))
+        (unless (= content-type cl-tls-kit:+tls-content-type-application-data+)
+          (%websocket-tls-fail
+           "The TLS peer sent unencrypted data after the handshake." content-type))
+        (let* ((state (%websocket-tls-state context :read :application))
+               (plaintext
+                 (cl-tls-kit:decrypt-tls13-traffic-record wire state))
+               (inner-type (cl-tls-kit:tls-plaintext-content-type plaintext))
+               (inner-fragment
+                 (cl-tls-kit:tls-plaintext-fragment plaintext)))
+          (cond
+            ((= inner-type cl-tls-kit:+tls-content-type-application-data+)
+             (cl-tls-kit:tls13-server-driver-note-application-data-received
+              (websocket-tls-context-driver context))
+             (setf (websocket-tls-stream-read-buffer stream) inner-fragment
+                   (websocket-tls-stream-read-position stream) 0)
+             (when (plusp (length inner-fragment))
+               (return t)))
+            ((= inner-type cl-tls-kit:+tls-content-type-handshake+)
+             (unless (cl-tls-kit:tls-key-update-p plaintext)
+               (%websocket-tls-fail
+                "The TLS peer sent an unsupported post-handshake message."))
+             (%websocket-tls-step
+              context (websocket-tls-stream-transport stream) inner-fragment
+              :application nil (websocket-tls-stream-clock-function stream)))
+            ((= inner-type cl-tls-kit:+tls-content-type-alert+)
+             (if (cl-tls-kit:tls-close-notify-p plaintext)
+                 (progn
+                   (setf (websocket-tls-stream-peer-close-notify-p stream) t
+                         (websocket-tls-stream-read-buffer stream)
+                         (make-array 0 :element-type '(unsigned-byte 8))
+                         (websocket-tls-stream-read-position stream) 0)
+                   (return nil))
+                 (progn
+                   (setf (websocket-tls-context-alert context) :peer-fatal-alert)
+                   (%websocket-tls-fail "The TLS peer sent a fatal alert."))))
+            (t
              (%websocket-tls-fail
-              "The TLS peer sent an unsupported post-handshake message."))
-           (%websocket-tls-step
-            context (websocket-tls-stream-transport stream) inner-fragment
-            :application nil (websocket-tls-stream-clock-function stream)))
-          ((= inner-type cl-tls-kit:+tls-content-type-alert+)
-           (if (cl-tls-kit:tls-close-notify-p plaintext)
-               (progn
-                 (setf (websocket-tls-stream-peer-close-notify-p stream) t
-                       (websocket-tls-stream-read-buffer stream)
-                       (make-array 0 :element-type '(unsigned-byte 8))
-                       (websocket-tls-stream-read-position stream) 0)
-                 (return nil))
-               (progn
-                 (setf (websocket-tls-context-alert context) :peer-fatal-alert)
-                 (%websocket-tls-fail "The TLS peer sent a fatal alert."))))
-          (t
-           (%websocket-tls-fail
-            "The TLS peer sent an invalid TLSInnerPlaintext type."
-            inner-type)))))))
+              "The TLS peer sent an invalid TLSInnerPlaintext type."
+              inner-type))))))))
 
 #+sbcl
 (defclass websocket-tls-stream
@@ -765,8 +792,11 @@
           (unwind-protect
                (cl-tls-kit:tls13-server-driver-close
                 (websocket-tls-context-driver context))
-            (close (websocket-tls-stream-transport stream)
-                   :abort abort-p))))))
+            (unwind-protect
+                 (cl-tls-kit:destroy-tls13-server-ticket-key-store
+                  (websocket-tls-context-ticket-key-store context))
+              (close (websocket-tls-stream-transport stream)
+                     :abort abort-p)))))))
   t)
 
 #-sbcl

@@ -46,6 +46,7 @@
                (:file "tests-http2-3-connection")
                (:file "tests-network")
                (:file "tests-tls")
+               (:file "tests-tls-security")
                (:file "tests-handshake")
                (:file "runner"))
   :perform (asdf:test-op (op c)
