@@ -162,7 +162,7 @@
                                       (close-websocket-connection
                                        connection :send-close-p nil)))
                                 (error (condition)
-                                  (setf server-error condition)))))
+                                  (setf server-error condition))))))
                      (setf driver
                            (%tls-test-client-driver
                             listener trust-anchor '("http/1.1")))
@@ -272,7 +272,7 @@
                                    (close-websocket-connection
                                     connection :send-close-p nil)))
                              (error (condition)
-                               (setf server-error condition)))))
+                               (setf server-error condition))))))
                   (multiple-value-setq (driver version-rewritten-p)
                     (%tls-security-client-driver-with-legacy-version
                      listener trust-anchor))
@@ -342,4 +342,4 @@
                (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
              (close-websocket-listener listener)
              (when server-thread
-               (sb-thread:join-thread server-thread)))))))))))
+               (sb-thread:join-thread server-thread)))))))))
