@@ -535,7 +535,7 @@
    :certificate-chain certificate-chain
    :private-key private-key
    :alpn-protocols alpn
-   :cipher-suites '(#x1301)))
+   :cipher-suites #(#x1301)))
 
 (defun %websocket-make-tls-server-wrapper
     (&key certificate key password alpn-protocols unwrap-stream-p clock-function)
