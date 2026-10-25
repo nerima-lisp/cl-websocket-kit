@@ -78,12 +78,13 @@ WebSocket URI strings using `ws` or `wss` are accepted by
 The server-side request predicate enforces the HTTP Upgrade invariants that
 belong to this layer: `GET` over HTTP/1.1, exactly one valid `Host`, upgrade
 and connection tokens, version 13, a valid key, no request body or trailers,
-and syntactically valid protocol and extension fields. Origin authorization
-is policy-controlled: an
-`origin-policy` function can authorize the Origin header;
-`make-websocket-origin-policy` builds a strict exact-match allowlist predicate
-for browser-facing listeners. The response builder and client validator only
-accept protocols and extension names that were offered by the peer.
+and syntactically valid protocol and extension fields. When `:origin-policy`
+is `NIL`, the listener permits any Origin. Browser clients using cookie
+authentication should set an exact-match allowlist with
+`make-websocket-origin-policy`. Origin checks are not authentication. The
+listener example below shows how to pass the policy. The response builder and
+client validator only accept protocols and extension names that were offered
+by the peer.
 
 Text messages and close reasons are validated as UTF-8. Peer-originated
 invalid UTF-8 is signaled as `websocket-invalid-data`; size violations use
@@ -132,6 +133,33 @@ body bytes; `serve-websocket-listener` also applies the default WebSocket
 message, payload, fragment, and control-frame limits. Explicit `NIL` can
 disable the HTTP/1.1 timeout or boundary for a low-level caller, while
 session message limits must be positive integers when overridden.
+
+### Listener concurrency and timeouts
+
+`serve-websocket-listener` accepts `:worker-count`, `:session-timeout`, and
+`:idle-timeout`. It defaults to one worker, while `:session-timeout` and
+`:idle-timeout` default to `NIL`, so established sessions have no session or
+idle timeout unless the application sets one. A single worker can remain
+occupied by an idle client. On SBCL, configure multiple workers and finite
+timeouts, for example:
+
+```lisp
+(websocket-kit:serve-websocket-listener
+ listener
+ #'handle-websocket-message
+ :worker-count 4
+ :session-timeout 3600
+ :idle-timeout 300
+ :origin-policy
+ (websocket-kit:make-websocket-origin-policy
+  '("https://app.example.com")))
+```
+
+Use a listener returned by `open-websocket-listener` and define
+`handle-websocket-message` in the application. Timeout values are seconds. This
+example allows four concurrent sessions, limits each session to one hour, and
+closes an inactive connection after five minutes. The Origin allowlist matches
+`https://app.example.com` exactly.
 
 `make-websocket-tls-server-wrapper` provides TLS 1.3 for
 `open-websocket-listener` through its `:tls-wrapper` argument. The wrapper
