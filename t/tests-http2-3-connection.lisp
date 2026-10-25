@@ -595,6 +595,83 @@
             (websocket-kit::%websocket-http2-3-connection-stream-read stream)
           (expect payload :to-equalp nil)
           (expect endp :to-equalp t)))))
+  (it "rejects an HTTP/3 dynamic reference beyond the default blocked-stream limit"
+    (let* ((headers
+             (make-websocket-http2-connect-headers
+              "example.test"
+              :headers (list (make-http-header "x-dynamic" "ready"))))
+           (peer-qpack
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (capacity-wire
+             (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
+           (insert-wire
+             (http-message-kit:qpack-encode-insert-with-literal-name
+              peer-qpack "x-dynamic" "ready" :huffman nil))
+           (encoder-wire
+             (concatenate '(vector (unsigned-byte 8))
+                          capacity-wire insert-wire))
+           (section-wire
+             (http-message-kit:qpack-encode-header-block
+              headers :context peer-qpack :use-dynamic-p t
+              :stream-id 0 :huffman nil))
+           (stream-wire
+             (http-kit/http3:encode-http3-frame
+              (http-kit/http3:make-http3-frame
+               :type http-kit/http3:+http3-headers-type+
+               :payload section-wire)))
+           (peer-decoder
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (writes (list nil))
+           (connection
+             (make-websocket-http3-connection
+              :role :server
+              :qpack-max-table-capacity 128
+              :write-function (%connection-test-writer writes))))
+      (http-message-kit:qpack-decode-encoder-stream peer-decoder encoder-wire)
+      (multiple-value-bind (decoded used required base)
+          (http-message-kit:qpack-decode-header-block
+           section-wire :context peer-decoder :stream-id 0)
+        (declare (ignore used base))
+        (expect decoded :to-equalp headers)
+        (expect (plusp required) :to-equalp t))
+      (websocket-http2-3-connection-start connection)
+      (let* ((settings-write (first (car writes)))
+             (settings-wire (first settings-write)))
+        (multiple-value-bind (settings used)
+            (decode-websocket-http3-connect-settings settings-wire)
+          (expect used :to-equalp (length settings-wire))
+          (expect (cdr (assoc 1 settings)) :to-equalp 128)
+          (expect (cdr (assoc 7 settings)) :to-equalp 0)))
+      (websocket-http3-connection-feed-stream
+       connection 2
+       (encode-websocket-http3-connect-settings
+        :qpack-max-table-capacity 128 :qpack-blocked-streams 1))
+      (let ((failure nil))
+        (handler-case
+            (websocket-http3-connection-feed-stream
+             connection 0 stream-wire :fin-p t)
+          (http-message-kit:http-connection-error (condition)
+            (setf failure condition)))
+        (expect (typep failure 'http-message-kit:http-connection-error)
+                :to-equalp t)
+        (when (typep failure 'http-message-kit:http-connection-error)
+          (let ((cause
+                  (http-message-kit:http-connection-error-cause failure)))
+            (expect (typep cause 'http-message-kit:http-protocol-error)
+                    :to-equalp t)
+            (when (typep cause 'http-message-kit:http-protocol-error)
+              (expect
+               (first (http-message-kit:http-protocol-error-detail cause))
+               :to-equalp
+               :qpack-decompression-failed)))))))
   (it "validates blocked HTTP/3 trailers with the trailer role"
     (let* ((trailer-headers
              (append
