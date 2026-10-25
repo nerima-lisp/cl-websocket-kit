@@ -903,11 +903,6 @@
       (%websocket-http3-prepare-header-block
        headers stream-id context request-p trailers-p huffman-p
        max-header-block-bytes)
-    (when (> (length block) max-header-block-bytes)
-      (%websocket-size-error
-       "An HTTP/3 header block exceeded its selected size limit."
-       max-header-block-bytes
-       (length block)))
     (when (> (length block) max-frame-size)
       (%websocket-http2-3-fail
        "The HTTP/3 WebSocket HEADERS block exceeds the selected frame size."
