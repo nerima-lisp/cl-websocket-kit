@@ -177,6 +177,8 @@
               pkgs.sbcl
               pkgs.coreutils
               pkgs.perl
+              pkgs.openssl
+              pkgs.socat
             ];
           };
         }
@@ -212,6 +214,8 @@
             name = "cl-websocket-kit-test";
             runtimeInputs = [
               pkgs.sbcl
+              pkgs.openssl
+              pkgs.socat
               clWeave
               messageKit
               hpackKit

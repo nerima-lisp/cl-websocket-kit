@@ -1053,14 +1053,15 @@ The stream is closed even when sending the Close frame signals an error."
           (and (null certificate) (null key)))))
 
 (defun make-websocket-tls-upgrader
-    (&key (verify :required) alpn-protocols certificate key password
+    (&key (verify :required) alpn-protocols tls-trust-anchors certificate key password
           (unwrap-stream-p nil)
           (clock-function #'%websocket-monotonic-time))
   "Return a client TLS-upgrade callback backed by cl-http-kit.
 
 The callback receives a binary STREAM and HTTP URI, and accepts TIMEOUT and
 DEADLINE keyword arguments. VERIFY may be NIL, :OPTIONAL, or :REQUIRED.
-Custom TLS callbacks may return the selected ALPN protocol as a second value."
+TLS-TRUST-ANCHORS are passed to cl-http-kit for private CA verification. Custom
+TLS callbacks may return the selected ALPN protocol as a second value."
   (unless (%websocket-valid-tls-verify-p verify)
     (%websocket-protocol-error
      "TLS VERIFY must be NIL, :OPTIONAL, or :REQUIRED."
@@ -1092,6 +1093,7 @@ Custom TLS callbacks may return the selected ALPN protocol as a second value."
   (http-kit/tls:make-http-tls-upgrader
    :verify verify
    :alpn-protocols alpn-protocols
+   :trust-anchors tls-trust-anchors
    :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
@@ -1263,11 +1265,14 @@ protocol as a second value when cl+ssl reports one."
          (max-fields +websocket-default-max-header-fields+) max-body-bytes
          tls-upgrader (tls-verify :required)
          (tls-alpn-protocols '("http/1.1"))
+         tls-trust-anchors
          tls-certificate tls-key tls-password
          (local-mask-p t) (peer-mask-required-p t)
          payload-encoder payload-decoder (payload-reserved-bits 0)
          (clock-function #'%websocket-monotonic-time))
-  "Open a TCP or TLS WebSocket client connection for URI."
+  "Open a TCP or TLS WebSocket client connection for URI.
+
+TLS-TRUST-ANCHORS supplies certificates for verifying secure connections."
   (let* ((clock (%websocket-network-clock clock-function))
          (input-uri (%websocket-network-uri uri))
          (secure-p (member (string-downcase (%websocket-uri-scheme uri))
@@ -1339,6 +1344,7 @@ protocol as a second value when cl+ssl reports one."
                  (when secure-p
                    (make-websocket-tls-upgrader
                     :verify tls-verify :alpn-protocols tls-alpn-protocols
+                    :tls-trust-anchors tls-trust-anchors
                     :certificate tls-certificate :key tls-key
                     :password tls-password :clock-function clock))))
            (raw-opener
