@@ -1553,7 +1553,12 @@
 
 (defun %websocket-http2-3-connection-qpack-wire-complete-p
     (octets scanner message)
-  (let ((buffer (%websocket-http2-3-connection-copy-octets octets)))
+  (let ((buffer
+        (make-array (length octets)
+                    :element-type '(unsigned-byte 8)
+                    :adjustable t
+                    :fill-pointer (length octets)
+                    :initial-contents octets)))
     (loop while (plusp (fill-pointer buffer)) do
       (multiple-value-bind (status end)
           (funcall scanner buffer)
@@ -1733,7 +1738,11 @@
                  (websocket-http2-3-connection-h3-qpack-encoder-events
                   connection)
                  events)))
-        (let ((buffer (%websocket-http2-3-connection-copy-octets wire))
+        (let ((buffer (make-array (length wire)
+                    :element-type '(unsigned-byte 8)
+                    :adjustable t
+                    :fill-pointer (length wire)
+                    :initial-contents wire))
               (events nil))
           (loop while (plusp (fill-pointer buffer)) do
             (let* ((first (aref buffer 0))

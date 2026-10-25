@@ -1116,8 +1116,14 @@
       (%websocket-http2-3-fail
        "An HTTP/3 CONNECT settings input must be a SETTINGS frame."))
     (let ((settings
-            (http-kit/http3:decode-http3-settings
-             (http-kit/http3:make-http3-frame :type type :payload payload))))
+            (handler-case
+                 (http-kit/http3:decode-http3-settings
+                  (http-kit/http3:make-http3-frame
+                   :type type :payload payload))
+               (http-message-kit:http-protocol-error (condition)
+                 (%websocket-http2-3-fail
+                  "The HTTP/3 SETTINGS payload is invalid."
+                  :detail condition)))))
       (%websocket-http2-3-validate-http3-setting-identifiers settings)
       (let ((entry (assoc +websocket-http3-enable-connect-protocol-setting+
                           settings)))

@@ -499,7 +499,10 @@
               :headers (list (make-http-header "x-dynamic" "ready"))))
            (peer-qpack
              (http-message-kit:make-qpack-context
-              :max-table-capacity 128 :table-capacity 0 :huffman nil))
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
            (capacity-wire
              (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
            (insert-wire
@@ -600,7 +603,10 @@
               (list (make-http-header "x-dynamic" "ready"))))
            (peer-qpack
              (http-message-kit:make-qpack-context
-              :max-table-capacity 128 :table-capacity 0 :huffman nil))
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
            (capacity-wire
              (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
            (insert-wire
