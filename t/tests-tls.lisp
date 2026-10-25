@@ -188,6 +188,58 @@
              (when server-thread
                (sb-thread:join-thread server-thread)))))))
 
+    (it "closes the TCP transport after peer close_notify"
+      (%tls-test-with-certificate
+       (lambda (certificate key trust-anchor)
+         (let* ((listener
+                  (open-websocket-listener
+                   :host "127.0.0.1" :port 0
+                   :tls-wrapper
+                   (make-websocket-tls-server-wrapper
+                    :certificate certificate :key key)))
+                (server-error nil)
+                (server-transport nil)
+                (server-thread nil)
+                (driver nil))
+           (unwind-protect
+                (progn
+                  (setf server-thread
+                        (sb-thread:make-thread
+                         (lambda ()
+                           (handler-case
+                               (let* ((connection
+                                        (accept-websocket-connection
+                                         listener :timeout 10))
+                                      (stream
+                                        (websocket-connection-stream
+                                         connection)))
+                                 (setf server-transport
+                                       (websocket-kit::websocket-tls-stream-transport
+                                        stream))
+                                 (unless (eq (read-byte stream nil :eof) :eof)
+                                   (error "The TLS peer did not send close_notify."))
+                                 (close-websocket-connection
+                                  connection :send-close-p nil))
+                             (error (condition)
+                               (setf server-error condition))))))
+                  (setf driver
+                        (%tls-test-client-driver
+                         listener trust-anchor '("http/1.1")))
+                  (cl-tls-kit:tls13-client-driver-connect driver)
+                  (let ((response (%tls-test-websocket-upgrade driver)))
+                    (expect (http-response-status response) :to-equal 101))
+                  (cl-tls-kit:tls13-client-driver-close driver)
+                  (setf driver nil)
+                  (sb-thread:join-thread server-thread)
+                  (setf server-thread nil)
+                  (expect server-error :to-be nil)
+                  (expect (open-stream-p server-transport) :to-be nil))
+             (when driver
+               (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
+             (close-websocket-listener listener)
+             (when server-thread
+               (sb-thread:join-thread server-thread)))))))
+
     (it "reports an oversized TLS handshake record as a handshake failure"
       (%tls-test-with-certificate
        (lambda (certificate key trust-anchor)
@@ -213,7 +265,9 @@
                   (sb-thread:join-thread server-thread)
                   (setf server-thread nil)
                   (expect (typep server-error 'websocket-transport-error)
-                          :to-be t))
+                          :to-be t)
+                  (expect (websocket-error-detail server-error)
+                          :to-equal 16385))
              (close-websocket-listener listener)
              (when server-thread
                (sb-thread:join-thread server-thread)))))))

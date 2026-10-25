@@ -579,7 +579,8 @@
 
 (defun %websocket-tls-stream-fill-read-buffer (stream)
   (loop
-    (when (websocket-tls-stream-closed-p stream)
+    (when (or (websocket-tls-stream-closed-p stream)
+              (websocket-tls-stream-peer-close-notify-p stream))
       (return nil))
     (multiple-value-bind (content-type version fragment wire)
         (%websocket-tls-read-record
@@ -612,7 +613,7 @@
           ((= inner-type cl-tls-kit:+tls-content-type-alert+)
            (if (cl-tls-kit:tls-close-notify-p plaintext)
                (progn
-                 (setf (websocket-tls-stream-closed-p stream) t
+                 (setf (websocket-tls-stream-peer-close-notify-p stream) t
                        (websocket-tls-stream-read-buffer stream)
                        (make-array 0 :element-type '(unsigned-byte 8))
                        (websocket-tls-stream-read-position stream) 0)
@@ -634,7 +635,9 @@
    (read-buffer :initform (make-array 0 :element-type '(unsigned-byte 8))
                 :accessor websocket-tls-stream-read-buffer)
    (read-position :initform 0 :accessor websocket-tls-stream-read-position)
-   (closed-p :initform nil :accessor websocket-tls-stream-closed-p)))
+   (closed-p :initform nil :accessor websocket-tls-stream-closed-p)
+   (peer-close-notify-p :initform nil
+                        :accessor websocket-tls-stream-peer-close-notify-p)))
 
 #+sbcl
 (defmethod stream-element-type ((stream websocket-tls-stream))
@@ -720,7 +723,8 @@
 (defmethod close ((stream websocket-tls-stream) &key abort)
   (unless (websocket-tls-stream-closed-p stream)
     (unwind-protect
-         (unless abort
+         (unless (or abort
+                     (websocket-tls-stream-peer-close-notify-p stream))
            (let ((context (websocket-tls-stream-context stream)))
              (when (websocket-tls-context-handshake-complete-p context)
                (%websocket-tls-write-fragment
