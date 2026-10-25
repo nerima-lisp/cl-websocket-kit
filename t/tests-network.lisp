@@ -121,7 +121,70 @@
     (expect (plusp +websocket-default-handshake-timeout+) :to-be t)
     (expect (plusp +websocket-default-max-header-bytes+) :to-be t)
     (expect (plusp +websocket-default-max-header-fields+) :to-be t)
-    (expect (plusp +websocket-default-max-body-bytes+) :to-be t)))
+    (expect (plusp +websocket-default-max-body-bytes+) :to-be t))
+  #+sbcl
+  (it "returns 426 and the supported version for an unsupported peer version"
+    (let ((listener
+            (open-websocket-listener :host "127.0.0.1" :port 0)))
+      (let ((server-thread nil)
+            (server-result :not-run)
+            (client-socket nil)
+            (client-stream nil))
+        (unwind-protect
+             (progn
+               (setf server-thread
+                     (sb-thread:make-thread
+                      (lambda ()
+                        (setf server-result
+                              (accept-websocket-connection
+                               listener :timeout 5)))))
+               (setf client-socket
+                     (make-instance 'sb-bsd-sockets:inet-socket
+                                    :type :stream
+                                    :protocol :tcp))
+               (sb-bsd-sockets:socket-connect
+                client-socket
+                (sb-bsd-sockets:make-inet-address "127.0.0.1")
+                (websocket-listener-port listener))
+               (setf client-stream
+                     (sb-bsd-sockets:socket-make-stream
+                      client-socket
+                      :input t
+                      :output t
+                      :element-type '(unsigned-byte 8)
+                      :buffering :full))
+               (write-sequence
+                (http-octets
+                 "GET /socket HTTP/1.1"
+                 "Host: 127.0.0.1"
+                 "Upgrade: websocket"
+                 "Connection: Upgrade"
+                 "Sec-WebSocket-Version: 12"
+                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="
+                 "")
+                client-stream)
+               (finish-output client-stream)
+               (let ((response (read-http-response client-stream)))
+                 (expect (http-response-status response) :to-equalp 426)
+                 (expect
+                  (http-header-values
+                   (http-response-headers response)
+                   "Sec-WebSocket-Version")
+                  :to-equalp
+                  (list "13")))
+               (sb-thread:join-thread server-thread)
+               (setf server-thread nil)
+               (expect server-result :to-be nil))
+          (when client-stream
+            (close client-stream)
+            (setf client-stream nil
+                  client-socket nil))
+          (when client-socket
+            (sb-bsd-sockets:socket-close client-socket))
+          (when server-thread
+            (close-websocket-listener listener)
+            (sb-thread:join-thread server-thread))
+          (close-websocket-listener listener))))))
 
 (describe "permessage-deflate extension safety"
   (it "rejects selection without a complete transformer"

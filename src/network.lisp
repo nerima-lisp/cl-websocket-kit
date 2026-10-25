@@ -1868,10 +1868,22 @@ negotiation; selected extension names must still have been offered."
                                (funcall on-error condition))
                              (return-from accept-websocket-connection nil))))
                    (unless (websocket-upgrade-request-p request)
-                     (%websocket-network-reject-upgrade
-                      stream 400 "Bad Request"
-                      :deadline effective-deadline
-                      :clock-function clock)
+                     (let ((version
+                             (and (http-request-p request)
+                                  (%websocket-single-header-value
+                                   (http-request-headers request)
+                                   "Sec-WebSocket-Version"))))
+                       (if (and version (not (string= version "13")))
+                           (%websocket-network-reject-upgrade
+                            stream 426 "Upgrade Required"
+                            :headers (list (make-http-header
+                                            "Sec-WebSocket-Version" "13"))
+                            :deadline effective-deadline
+                            :clock-function clock)
+                           (%websocket-network-reject-upgrade
+                            stream 400 "Bad Request"
+                            :deadline effective-deadline
+                            :clock-function clock)))
                      (return-from accept-websocket-connection nil))
                    (unless (websocket-upgrade-request-p
                             request :origin-policy origin-policy)
