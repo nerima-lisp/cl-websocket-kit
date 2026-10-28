@@ -1098,17 +1098,26 @@ TLS callbacks may return the selected ALPN protocol as a second value."
    :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
-    (&key certificate key password (alpn-protocols (list "http/1.1"))
-          (unwrap-stream-p nil)
+    (&key certificate-chain private-key
+          (alpn-protocols (list "http/1.1"))
           (clock-function (function %websocket-monotonic-time)))
-  "Return a TLS 1.3 server callback using cl-tls-kit.
+  "Return a WebSocket listener TLS callback backed by cl-http-kit.
 
-CERTIFICATE accepts a PEM path or DER chain. KEY accepts an unencrypted
-P-256 or Ed25519 PEM path or a cl-crypto-kit private-key object. PASSWORD
-and UNWRAP-STREAM-P must be NIL."
+CERTIFICATE-CHAIN is a list of DER certificates, leaf first. PRIVATE-KEY
+is the matching cl-crypto-kit P-256 or Ed25519 key. ALPN-PROTOCOLS must
+include HTTP/1.1."
+  (unless (%websocket-valid-alpn-protocols-p alpn-protocols)
+    (%websocket-protocol-error
+     "TLS ALPN-PROTOCOLS must be a list of non-empty ASCII protocol names."
+     alpn-protocols))
+  (unless (member "http/1.1" alpn-protocols :test (function string=))
+    (%websocket-protocol-error
+     "TLS server ALPN-PROTOCOLS must include HTTP/1.1."
+     alpn-protocols))
   (%websocket-make-tls-server-wrapper
-   :certificate certificate :key key :password password
-   :alpn-protocols alpn-protocols :unwrap-stream-p unwrap-stream-p
+   :certificate-chain certificate-chain
+   :private-key private-key
+   :alpn-protocols alpn-protocols
    :clock-function clock-function))
 
 (defun %websocket-network-proxy-open-stream
