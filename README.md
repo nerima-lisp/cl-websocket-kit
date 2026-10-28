@@ -17,8 +17,8 @@ HTTP request and response values and `cl-http-kit/http2` plus
 `cl-http-kit/http3` for the HTTP/2 and HTTP/3 header and frame codecs. Native
 TCP and DNS support is provided on SBCL. Client-side TLS uses `cl-http-kit` by
 default through `make-websocket-tls-upgrader`; `connect-websocket` also accepts
-a custom `:tls-upgrader` callback. The TLS server wrapper uses `cl-tls-kit` and
-requires SBCL.
+a custom `:tls-upgrader` callback. The WSS server wrapper delegates TLS 1.3 to
+`cl-http-kit` and requires SBCL.
 
 ## Install
 
@@ -167,16 +167,23 @@ matching Pong does not arrive. `serve-websocket-listener` forwards both options
 to each session.
 
 `make-websocket-tls-server-wrapper` provides TLS 1.3 for
-`open-websocket-listener` through its `:tls-wrapper` argument. The wrapper
-accepts a PEM certificate path or a DER certificate chain and an unencrypted
-P-256 or Ed25519 private key in PEM or DER form, or a `cl-crypto-kit` private
-key object. Encrypted keys and RSA keys are unsupported. `:password` and
-`:unwrap-stream-p` must be `NIL`. The server supports
-`TLS_AES_128_GCM_SHA256`; its default ALPN list contains `http/1.1`, and any
-configured ALPN list must also contain that protocol.
+`open-websocket-listener` through its `:tls-wrapper` argument. It delegates to
+`http-kit/tls:make-http-tls-server-wrapper`. Pass `:certificate-chain` as a
+leaf-first list of DER certificates and `:private-key` as the matching
+`cl-crypto-kit` P-256 or Ed25519 key. The default ALPN list is `("http/1.1")`,
+and any configured list must include `http/1.1` for the HTTP/1.1 WebSocket
+handshake. Only HTTP/1.1 is handled; if a different configured ALPN protocol is
+negotiated, the listener rejects the connection. `accept-websocket-connection`
+starts one absolute deadline when called and uses it for TCP accept, the TLS
+handshake, and the subsequent HTTP upgrade. The delegated wrapper receives the
+same deadline and sends no TLS alert after it expires.
 
 The WSS server does not send TLS 1.3 `NewSessionTicket` messages, so TLS session
 resumption is unavailable and each connection performs a full handshake.
+The delegated wrapper uses fixed TLS record limits of 16,384 plaintext bytes
+and 16,640 ciphertext bytes, plus a fixed 1 MiB handshake-message limit. Its
+public arguments do not configure these limits or an aggregate certificate
+chain size/count limit; the X.509 parser limits each certificate to 1 MiB.
 
 The built-in request, response, and network path is HTTP/1.1. The kit also
 provides transport-agnostic HTTP/2 and HTTP/3 extended CONNECT header, frame,
