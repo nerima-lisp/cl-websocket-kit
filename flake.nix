@@ -10,7 +10,7 @@
     };
 
     cl-http-message-kit = {
-      url = "github:nerima-lisp/cl-http-message-kit/v2.0.0";
+      url = "github:nerima-lisp/cl-http-message-kit/v2.0.1";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.cl-weave.follows = "cl-weave";
       inputs.cl-hpack-codec-kit.follows = "cl-hpack-codec-kit";
@@ -40,14 +40,14 @@
     };
 
     cl-tls-kit = {
-      url = "github:nerima-lisp/cl-tls-kit/f39e05059c572bb51df93dd25f619d64d6749ecc";
+      url = "github:nerima-lisp/cl-tls-kit/v0.5.2";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.cl-weave.follows = "cl-weave";
       inputs.cl-crypto-kit.follows = "cl-crypto-kit";
     };
 
     cl-quic-kit = {
-      url = "github:nerima-lisp/cl-quic-kit/v0.1.1";
+      url = "github:nerima-lisp/cl-quic-kit/v0.2.7";
       flake = false;
     };
 
@@ -63,7 +63,7 @@
     };
 
     cl-http-kit = {
-      url = "github:nerima-lisp/cl-http-kit/48d5a0141fe8899571b79a2b1027f481c1d8307f";
+      url = "github:nerima-lisp/cl-http-kit/d332c596075af799a0d8ed908293c7477cb43f70";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.cl-weave.follows = "cl-weave";
       inputs.cl-boundary-kit.follows = "cl-boundary-kit";
