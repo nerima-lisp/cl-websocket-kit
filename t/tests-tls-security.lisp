@@ -74,7 +74,7 @@
              (%tls-test-close-tcp-stream client-stream client-socket)
              (close-websocket-listener listener)
              (when server-thread
-               (sb-thread:join-thread server-thread))))))
+               (sb-thread:join-thread server-thread)))))))
 
     (it "rejects a client that does not offer the server ALPN protocol"
       (%tls-test-with-certificate
@@ -118,7 +118,7 @@
                (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
              (close-websocket-listener listener)
              (when server-thread
-               (sb-thread:join-thread server-thread))))))
+               (sb-thread:join-thread server-thread)))))))
 
     (it "closes the WSS stream with close_notify and issues no session ticket"
       (%tls-test-with-certificate
@@ -184,5 +184,5 @@
                (ignore-errors (cl-tls-kit:tls13-client-driver-close driver)))
              (close-websocket-listener listener)
              (when server-thread
-               (sb-thread:join-thread server-thread))))))))
-)))
+               (sb-thread:join-thread server-thread)))))))
+))
