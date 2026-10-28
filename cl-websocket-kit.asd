@@ -10,9 +10,7 @@
                "cl-http-kit/network"
                "cl-http-kit/tls"
                "cl-http-kit/http2"
-               "cl-http-kit/http3"
-               "cl-tls-kit"
-               "cl-crypto-kit")
+               "cl-http-kit/http3")
   :pathname "src"
   :serial t
   :components ((:file "package")
@@ -34,7 +32,7 @@
 
 (asdf:defsystem "cl-websocket-kit/test"
   :description "Tests for cl-websocket-kit."
-  :depends-on ("cl-websocket-kit" "cl-weave")
+  :depends-on ("cl-websocket-kit" "cl-weave" "cl-tls-kit" "cl-crypto-kit")
   :pathname "t"
   :serial t
   :components ((:file "package")
