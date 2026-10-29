@@ -146,7 +146,7 @@
         (list (cons 1 0))))
       (expect (websocket-http2-hpack-context-maximum-size encoder)
               :to-equalp
-              0)
+              +websocket-http2-default-hpack-table-size+)
       (expect (websocket-http2-hpack-context-max-size encoder)
               :to-equalp
               0)
