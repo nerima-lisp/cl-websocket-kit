@@ -1147,7 +1147,7 @@ protocol as a second value when cl+ssl reports one."
                   (websocket-tls-selected-alpn-protocol tls-stream)))))))
 
 (defun %websocket-network-proxy-open-stream
-    (raw-opener websocket-proxy raw-stream-pair deadline clock-function)
+    (raw-opener websocket-proxy raw-stream-pair clock-function)
   (lambda (request &key timeout deadline proxy-plan proxy &allow-other-keys)
     (let ((opened (funcall raw-opener request
                            :timeout timeout
@@ -1172,9 +1172,6 @@ protocol as a second value when cl+ssl reports one."
                opened (car raw-stream-pair))
               (error condition)))
           opened))))
-
-(defun %websocket-network-proxy-close-stream (stream raw-stream-pair)
-  (%websocket-network-close-stream-pair stream (car raw-stream-pair)))
 
 (defun websocket-tls-selected-alpn-protocol (stream)
   "Return the ALPN protocol selected on STREAM, or NIL when unavailable."
@@ -1358,12 +1355,11 @@ TLS-TRUST-ANCHORS supplies certificates for verifying secure connections."
                           &allow-other-keys)
                (funcall
                 (%websocket-network-proxy-open-stream
-                 raw-opener proxy raw-stream-pair effective-deadline clock)
+                 raw-opener proxy raw-stream-pair clock)
                 request :timeout timeout :deadline deadline
                 :proxy-plan proxy-plan :proxy transport-proxy))
              (close-proxy-stream (opened)
-               (%websocket-network-proxy-close-stream
-                opened raw-stream-pair)))
+               (%websocket-network-close-stream-pair opened (car raw-stream-pair))))
         (let* ((tls-callback
                  (%websocket-network-client-tls-upgrader
                   proxy origin-tls-upgrader effective-deadline clock))
@@ -1385,7 +1381,6 @@ TLS-TRUST-ANCHORS supplies certificates for verifying secure connections."
                          (funcall open-stream request :timeout timeout
                                   :deadline effective-deadline
                                   :proxy-plan proxy-plan)
-                       (websocket-error (condition) (error condition))
                        (http-kit:http-error (condition)
                          (%websocket-network-failure
                           "The HTTP transport could not open the WebSocket connection."

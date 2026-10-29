@@ -153,6 +153,25 @@
       (expect (websocket-http2-hpack-context-maximum-size decoder)
               :to-equalp
               +websocket-http2-default-hpack-table-size+)))
+  (it "caps a peer HPACK table size at the local maximum"
+    (let* ((writes (list nil))
+           (connection
+             (make-websocket-http2-connection
+              :role :client
+              :write-function (%connection-test-writer writes)))
+           (encoder
+             (websocket-http2-3-connection-hpack-encoder-context connection)))
+      (websocket-http2-3-connection-start connection)
+      (websocket-http2-3-connection-feed
+       connection
+       (websocket-kit::%websocket-http2-3-connection-encode-settings
+        (list (cons 1 #xffffffff))))
+      (expect (websocket-http2-hpack-context-maximum-size encoder)
+              :to-equalp
+              +websocket-http2-default-hpack-table-size+)
+      (expect (websocket-http2-hpack-context-max-size encoder)
+              :to-equalp
+              +websocket-http2-default-hpack-table-size+)))
 
   (it "rejects an HTTP/2 SETTINGS ACK that is not pending"
     (let* ((writes (list nil))

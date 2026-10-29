@@ -524,10 +524,10 @@
           (encoder-context
             (websocket-http2-3-connection-hpack-encoder-context connection)))
       (when (and peer-table-size encoder-context)
-        (set-websocket-http2-hpack-context-maximum-size
-         encoder-context peer-table-size)
         (set-websocket-http2-hpack-context-max-size
-         encoder-context peer-table-size)))
+         encoder-context
+         (min peer-table-size
+              (websocket-http2-hpack-context-maximum-size encoder-context)))))
     (setf (websocket-http2-3-connection-peer-settings connection) settings
           (websocket-http2-3-connection-peer-settings-seen-p connection) t)
     settings))
@@ -1949,7 +1949,6 @@
                  connection)
                 (websocket-http2-3-stream-id stream)
                 :role role
-                :serialize (lambda (thunk) (funcall thunk))
                 :on-section-acknowledgment
                 (lambda (ack-stream-id)
                   (%websocket-http2-3-connection-send-http3-qpack-wire
