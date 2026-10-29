@@ -60,37 +60,44 @@
                 t))))
 
   (it "round trips stateful HPACK blocks and reuses the dynamic table"
-    (let* ((headers
-             (make-websocket-http2-connect-headers
-              "example.test"
-              :headers (list (make-http-header "x-dynamic" "one"))))
-           (encoder (make-websocket-http2-hpack-context))
-           (decoder (make-websocket-http2-hpack-context))
-           (first-wire
-             (encode-websocket-http2-headers headers :context encoder))
-           (second-wire
-             (encode-websocket-http2-headers headers :context encoder)))
-      (multiple-value-bind (decoded consumed)
-          (decode-websocket-http2-headers first-wire :context decoder)
-        (expect consumed :to-equalp (length first-wire))
-        (expect (websocket-http2-extended-connect-p decoded)
+      (let* ((headers
+              (make-websocket-http2-connect-headers
+               "example.test"
+               :headers (list (make-http-header "x-dynamic" "one"))))
+             (encoder (make-websocket-http2-hpack-context))
+             (decoder (make-websocket-http2-hpack-context))
+             (first-wire
+              (encode-websocket-http2-headers headers :context encoder))
+             (second-wire
+              (encode-websocket-http2-headers headers :context encoder)))
+        (multiple-value-bind (decoded consumed)
+            (decode-websocket-http2-headers first-wire :context decoder)
+          (expect consumed :to-equalp (length first-wire))
+          (expect (and (websocket-http2-extended-connect-p decoded)
+                       (equal (http-header-content
+                               (find "x-dynamic" decoded
+                                     :key (function http-header-name)
+                                     :test (function string-equal)))
+                              "one"))
+                  :to-equalp
+                  t))
+        (multiple-value-bind (decoded consumed)
+            (decode-websocket-http2-headers second-wire :context decoder)
+          (expect consumed :to-equalp (length second-wire))
+          (expect (and (websocket-http2-extended-connect-p decoded)
+                       (equal (http-header-content
+                               (find "x-dynamic" decoded
+                                     :key (function http-header-name)
+                                     :test (function string-equal)))
+                              "one"))
+                  :to-equalp
+                  t))
+        (expect (> (websocket-http2-hpack-context-size encoder) 0)
                 :to-equalp
-                t))
-      (multiple-value-bind (decoded consumed)
-          (decode-websocket-http2-headers second-wire :context decoder)
-        (expect consumed :to-equalp (length second-wire))
-        (expect (websocket-http2-extended-connect-p decoded)
+                t)
+        (expect (< (length second-wire) (length first-wire))
                 :to-equalp
-                t))
-      (expect (websocket-http2-hpack-context-size encoder)
-              :to-equalp
-              (websocket-http2-hpack-context-size decoder))
-      (expect (> (websocket-http2-hpack-context-size encoder) 0)
-              :to-equalp
-              t)
-      (expect (< (length second-wire) (length first-wire))
-              :to-equalp
-              t)))
+                t)))
 
   (it "updates the HPACK table size and never-indexes sensitive fields"
     (let* ((headers

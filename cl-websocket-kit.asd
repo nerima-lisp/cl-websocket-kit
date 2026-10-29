@@ -6,6 +6,9 @@
   :license "MIT"
   :version "0.1.0"
   :depends-on ("cl-http-message-kit"
+               "cl-http-kit/client"
+               "cl-http-kit/network"
+               "cl-http-kit/tls"
                "cl-http-kit/http2"
                "cl-http-kit/http3")
   :pathname "src"

@@ -146,11 +146,30 @@
         (list (cons 1 0))))
       (expect (websocket-http2-hpack-context-maximum-size encoder)
               :to-equalp
-              0)
+              +websocket-http2-default-hpack-table-size+)
       (expect (websocket-http2-hpack-context-max-size encoder)
               :to-equalp
               0)
       (expect (websocket-http2-hpack-context-maximum-size decoder)
+              :to-equalp
+              +websocket-http2-default-hpack-table-size+)))
+  (it "caps a peer HPACK table size at the local maximum"
+    (let* ((writes (list nil))
+           (connection
+             (make-websocket-http2-connection
+              :role :client
+              :write-function (%connection-test-writer writes)))
+           (encoder
+             (websocket-http2-3-connection-hpack-encoder-context connection)))
+      (websocket-http2-3-connection-start connection)
+      (websocket-http2-3-connection-feed
+       connection
+       (websocket-kit::%websocket-http2-3-connection-encode-settings
+        (list (cons 1 #xffffffff))))
+      (expect (websocket-http2-hpack-context-maximum-size encoder)
+              :to-equalp
+              +websocket-http2-default-hpack-table-size+)
+      (expect (websocket-http2-hpack-context-max-size encoder)
               :to-equalp
               +websocket-http2-default-hpack-table-size+)))
 
@@ -491,4 +510,273 @@
                (length octets)))))
       (signals websocket-http-error
         (websocket-http3-connection-feed-stream
-         connection 3 (octets) :fin-p t)))))
+         connection 3 (octets) :fin-p t))))
+   (it "resumes blocked HTTP/3 headers after buffered encoder instructions arrive" (let* ((headers
+             (make-websocket-http2-connect-headers
+              "example.test"
+              :headers (list (make-http-header "x-dynamic" "ready"))))
+           (peer-qpack
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (capacity-wire
+             (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
+           (insert-wire
+             (http-message-kit:qpack-encode-insert-with-literal-name
+              peer-qpack "x-dynamic" "ready" :huffman nil))
+           (encoder-wire
+             (concatenate '(vector (unsigned-byte 8))
+                          capacity-wire insert-wire))
+           (section-wire
+             (http-message-kit:qpack-encode-header-block
+              headers :context peer-qpack :use-dynamic-p t
+              :stream-id 0 :huffman nil))
+           (following-data
+             (encode-websocket-http3-data-frame (octets 9) 0))
+           (stream-wire
+             (concatenate
+              '(vector (unsigned-byte 8))
+              (websocket-kit::%websocket-http2-3-encode-http3-frame
+               http-kit/http3:+http3-headers-type+ section-wire)
+              following-data))
+           (connection
+             (make-websocket-http3-connection
+              :role :server
+              :qpack-max-table-capacity 128
+              :qpack-blocked-streams 1
+              :write-function
+              (lambda (octets &key stream-id end-stream-p)
+                (declare (ignore stream-id end-stream-p))
+                (length octets)))))
+      (expect (plusp (aref section-wire 0)) :to-equalp t)
+      (expect (> (length capacity-wire) 1) :to-equalp t)
+      (websocket-http3-connection-feed-stream
+       connection 2
+       (encode-websocket-http3-connect-settings
+        :qpack-max-table-capacity 128 :qpack-blocked-streams 1))
+      (websocket-http3-connection-feed-stream
+       connection 0 stream-wire :fin-p t)
+      (let ((stream (websocket-http2-3-connection-stream connection 0)))
+        (expect
+         (http-message-kit:qpack-blocked-stream-p
+          (websocket-kit::websocket-http2-3-stream-blocked-header-token stream))
+         :to-equalp t)
+        (expect
+         (websocket-kit::websocket-http2-3-stream-remote-fin-pending-p stream)
+         :to-equalp t)
+        (expect (websocket-http2-3-stream-remote-end-p stream)
+                :to-equalp nil)
+        (expect
+         (plusp
+          (fill-pointer
+           (websocket-kit::websocket-http2-3-stream-wire-buffer stream)))
+         :to-equalp t))
+      (websocket-http3-connection-feed-stream
+       connection 6 (subseq encoder-wire 0 1))
+      (expect
+       (fill-pointer
+        (websocket-kit::websocket-http2-3-connection-h3-qpack-encoder-wire-buffer
+         connection))
+       :to-equalp
+       1)
+      (websocket-http3-connection-feed-stream
+       connection 6 (subseq encoder-wire 1))
+      (let ((stream (websocket-http2-3-connection-stream connection 0)))
+        (expect
+         (websocket-kit::websocket-http2-3-stream-blocked-header-token stream)
+         :to-equalp nil)
+        (expect
+         (websocket-kit::websocket-http2-3-stream-remote-fin-pending-p stream)
+         :to-equalp nil)
+        (expect (websocket-http2-3-stream-remote-end-p stream)
+                :to-equalp t)
+        (expect
+         (http-header-content
+          (find "x-dynamic" (websocket-http2-3-stream-headers stream)
+                :key #'http-header-name :test #'string-equal))
+         :to-equalp
+         "ready")
+        (expect
+         (not
+          (null
+           (member '(:section-ack 0)
+                   (websocket-kit::websocket-http2-3-connection-h3-qpack-decoder-events
+                    connection)
+                   :test #'equal)))
+         :to-equalp t)
+        (multiple-value-bind (payload endp)
+            (websocket-kit::%websocket-http2-3-connection-stream-read stream)
+          (expect payload :to-equalp following-data)
+          (expect endp :to-equalp nil))
+        (multiple-value-bind (payload endp)
+            (websocket-kit::%websocket-http2-3-connection-stream-read stream)
+          (expect payload :to-equalp nil)
+          (expect endp :to-equalp t)))))
+  (it "rejects an HTTP/3 dynamic reference beyond the default blocked-stream limit"
+    (let* ((headers
+             (make-websocket-http2-connect-headers
+              "example.test"
+              :headers (list (make-http-header "x-dynamic" "ready"))))
+           (peer-qpack
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (capacity-wire
+             (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
+           (insert-wire
+             (http-message-kit:qpack-encode-insert-with-literal-name
+              peer-qpack "x-dynamic" "ready" :huffman nil))
+           (encoder-wire
+             (concatenate '(vector (unsigned-byte 8))
+                          capacity-wire insert-wire))
+           (section-wire
+             (http-message-kit:qpack-encode-header-block
+              headers :context peer-qpack :use-dynamic-p t
+              :stream-id 0 :huffman nil))
+           (stream-wire
+             (http-kit/http3:encode-http3-frame
+              (http-kit/http3:make-http3-frame
+               :type http-kit/http3:+http3-headers-type+
+               :payload section-wire)))
+           (peer-decoder
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (writes (list nil))
+           (connection
+             (make-websocket-http3-connection
+              :role :server
+              :qpack-max-table-capacity 128
+              :write-function (%connection-test-writer writes))))
+      (http-message-kit:qpack-decode-encoder-stream peer-decoder encoder-wire)
+      (multiple-value-bind (decoded used required base)
+          (http-message-kit:qpack-decode-header-block
+           section-wire :context peer-decoder :stream-id 0)
+        (declare (ignore used base))
+        (expect decoded :to-equalp headers)
+        (expect (plusp required) :to-equalp t))
+      (websocket-http2-3-connection-start connection)
+      (let* ((settings-write (first (car writes)))
+             (settings-wire (first settings-write)))
+        (multiple-value-bind (settings used)
+            (decode-websocket-http3-connect-settings settings-wire)
+          (expect used :to-equalp (length settings-wire))
+          (expect (cdr (assoc 1 settings)) :to-equalp 128)
+          (expect (cdr (assoc 7 settings)) :to-equalp 0)))
+      (websocket-http3-connection-feed-stream
+       connection 2
+       (encode-websocket-http3-connect-settings
+        :qpack-max-table-capacity 128 :qpack-blocked-streams 1))
+      (let ((failure nil))
+        (handler-case
+            (websocket-http3-connection-feed-stream
+             connection 0 stream-wire :fin-p t)
+          (http-message-kit:http-connection-error (condition)
+            (setf failure condition)))
+        (expect (typep failure 'http-message-kit:http-connection-error)
+                :to-equalp t)
+        (when (typep failure 'http-message-kit:http-connection-error)
+          (let ((cause
+                  (http-message-kit:http-connection-error-cause failure)))
+            (expect (typep cause 'http-message-kit:http-protocol-error)
+                    :to-equalp t)
+            (when (typep cause 'http-message-kit:http-protocol-error)
+              (expect
+               (first (http-message-kit:http-protocol-error-detail cause))
+               :to-equalp
+               :qpack-decompression-failed)))))))
+  (it "validates blocked HTTP/3 trailers with the trailer role"
+    (let* ((trailer-headers
+             (append
+              (list (make-http-pseudo-header ":method" "GET")
+                    (make-http-pseudo-header ":scheme" "https")
+                    (make-http-pseudo-header ":authority" "example.test")
+                    (make-http-pseudo-header ":path" "/"))
+              (list (make-http-header "x-dynamic" "ready"))))
+           (peer-qpack
+             (http-message-kit:make-qpack-context
+              :max-table-capacity 128
+              :table-capacity 0
+              :max-blocked-streams 1
+              :huffman nil))
+           (capacity-wire
+             (http-message-kit:qpack-encode-set-capacity peer-qpack 128))
+           (insert-wire
+             (http-message-kit:qpack-encode-insert-with-literal-name
+              peer-qpack "x-dynamic" "ready" :huffman nil))
+           (encoder-wire
+             (concatenate '(vector (unsigned-byte 8))
+                          capacity-wire insert-wire))
+           (section-wire
+             (http-message-kit:qpack-encode-header-block
+              trailer-headers :context peer-qpack :use-dynamic-p t
+              :stream-id 0 :huffman nil))
+           (initial-wire
+             (encode-websocket-http3-headers-frame
+              (make-websocket-http2-connect-headers "example.test")
+              0 :request-p t :huffman-p nil))
+           (trailer-frame
+             (websocket-kit::%websocket-http2-3-encode-http3-frame
+              http-kit/http3:+http3-headers-type+ section-wire))
+           (connection
+             (make-websocket-http3-connection
+              :role :server
+              :qpack-max-table-capacity 128
+              :qpack-blocked-streams 1
+              :write-function (lambda (octets &key stream-id end-stream-p)
+                                (declare (ignore stream-id end-stream-p))
+                                (length octets)))))
+      (websocket-http3-connection-feed-stream
+       connection 2
+       (encode-websocket-http3-connect-settings
+        :qpack-max-table-capacity 128 :qpack-blocked-streams 1))
+      (websocket-http3-connection-feed-stream connection 0 initial-wire)
+      (websocket-http3-connection-feed-stream
+       connection 0 trailer-frame :fin-p t)
+      (expect
+       (http-message-kit:qpack-blocked-stream-p
+        (websocket-kit::websocket-http2-3-stream-blocked-header-token
+         (websocket-http2-3-connection-stream connection 0)))
+       :to-equalp t)
+      (signals websocket-http-error
+        (websocket-http3-connection-feed-stream
+         connection 6 encoder-wire))
+      (websocket-http2-3-connection-abort connection)))
+  (it "discards HTTP/3 QPACK state when startup writes fail"
+    (let* ((close-calls 0)
+           (close-abort-p nil)
+           (connection
+             (make-websocket-http3-connection
+              :role :client
+              :write-function
+              (lambda (octets &key stream-id end-stream-p)
+                (declare (ignore octets stream-id end-stream-p))
+                0)
+              :close-function
+              (lambda (&key abort-p)
+                (setf close-abort-p abort-p)
+                (incf close-calls)))))
+      (signals websocket-transport-error
+        (websocket-http2-3-connection-start connection))
+      (expect (websocket-http2-3-connection-closed-p connection)
+              :to-equalp t)
+      (expect
+       (websocket-kit::websocket-http2-3-connection-h3-qpack-encoder-table
+        connection)
+       :to-equalp nil)
+      (expect
+       (websocket-kit::websocket-http2-3-connection-h3-qpack-decoder-table
+        connection)
+       :to-equalp nil)
+      (expect
+       (websocket-kit::websocket-http2-3-connection-h3-qpack-http3-decoder-context
+        connection)
+       :to-equalp nil)
+      (expect close-calls :to-equalp 1)
+      (expect close-abort-p :to-equalp t))))

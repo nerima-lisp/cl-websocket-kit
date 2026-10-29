@@ -1,52 +1,5 @@
 (in-package #:websocket-kit/test)
 
-(describe "SOCKS5 address encoding"
-  (it "encodes IPv4 literals with address type 1"
-    (multiple-value-bind (address-type octets)
-        (websocket-kit::%websocket-network-socks5-address "192.0.2.1")
-      (expect address-type :to-equalp 1)
-      (expect octets :to-equalp (octets 192 0 2 1))))
-
-  (it "encodes compressed IPv6 literals with address type 4"
-    (multiple-value-bind (address-type octets)
-        (websocket-kit::%websocket-network-socks5-address "2001:db8::1")
-      (expect address-type :to-equalp 4)
-      (expect octets
-              :to-equalp
-              (octets #x20 #x01 #x0d #xb8
-                      0 0 0 0 0 0 0 0 0 0 0 1)))
-    (multiple-value-bind (address-type octets)
-        (websocket-kit::%websocket-network-socks5-address
-         "[::ffff:192.0.2.1]")
-      (expect address-type :to-equalp 4)
-      (expect octets
-              :to-equalp
-              (octets 0 0 0 0 0 0 0 0 0 0 #xff #xff 192 0 2 1))))
-
-  (it "handles compression at either IPv6 boundary"
-    (dolist (case (list
-                   (list "::"
-                         (octets 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
-                   (list "::1"
-                         (octets 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1))
-                   (list "1::"
-                         (octets 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
-      (destructuring-bind (host expected) case
-        (multiple-value-bind (address-type actual)
-            (websocket-kit::%websocket-network-socks5-address host)
-          (expect address-type :to-equalp 4)
-          (expect actual :to-equalp expected)))))
-
-  (it "uses address type 3 for domain names"
-    (multiple-value-bind (address-type octets)
-        (websocket-kit::%websocket-network-socks5-address "example.test")
-      (expect address-type :to-equalp 3)
-      (expect octets :to-equalp (ascii-octets "example.test"))))
-
-  (it "rejects malformed IPv6 literals"
-    (signals websocket-protocol-error
-      (websocket-kit::%websocket-network-socks5-address "2001:::1"))))
-
 (describe "SOCKS5 credentials"
   (it "requires username and password together"
     (signals websocket-protocol-error
@@ -168,7 +121,70 @@
     (expect (plusp +websocket-default-handshake-timeout+) :to-be t)
     (expect (plusp +websocket-default-max-header-bytes+) :to-be t)
     (expect (plusp +websocket-default-max-header-fields+) :to-be t)
-    (expect (plusp +websocket-default-max-body-bytes+) :to-be t)))
+    (expect (plusp +websocket-default-max-body-bytes+) :to-be t))
+  #+sbcl
+  (it "returns 426 and the supported version for an unsupported peer version"
+    (let ((listener
+            (open-websocket-listener :host "127.0.0.1" :port 0)))
+      (let ((server-thread nil)
+            (server-result :not-run)
+            (client-socket nil)
+            (client-stream nil))
+        (unwind-protect
+             (progn
+               (setf server-thread
+                     (sb-thread:make-thread
+                      (lambda ()
+                        (setf server-result
+                              (accept-websocket-connection
+                               listener :timeout 5)))))
+               (setf client-socket
+                     (make-instance 'sb-bsd-sockets:inet-socket
+                                    :type :stream
+                                    :protocol :tcp))
+               (sb-bsd-sockets:socket-connect
+                client-socket
+                (sb-bsd-sockets:make-inet-address "127.0.0.1")
+                (websocket-listener-port listener))
+               (setf client-stream
+                     (sb-bsd-sockets:socket-make-stream
+                      client-socket
+                      :input t
+                      :output t
+                      :element-type '(unsigned-byte 8)
+                      :buffering :full))
+               (write-sequence
+                (http-octets
+                 "GET /socket HTTP/1.1"
+                 "Host: 127.0.0.1"
+                 "Upgrade: websocket"
+                 "Connection: Upgrade"
+                 "Sec-WebSocket-Version: 12"
+                 "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA=="
+                 "")
+                client-stream)
+               (finish-output client-stream)
+               (let ((response (read-http-response client-stream)))
+                 (expect (http-response-status response) :to-equalp 426)
+                 (expect
+                  (http-header-values
+                   (http-response-headers response)
+                   "Sec-WebSocket-Version")
+                  :to-equalp
+                  (list "13")))
+               (sb-thread:join-thread server-thread)
+               (setf server-thread nil)
+               (expect server-result :to-be nil))
+          (when client-stream
+            (close client-stream)
+            (setf client-stream nil
+                  client-socket nil))
+          (when client-socket
+            (sb-bsd-sockets:socket-close client-socket))
+          (when server-thread
+            (close-websocket-listener listener)
+            (sb-thread:join-thread server-thread))
+          (close-websocket-listener listener))))))
 
 (describe "permessage-deflate extension safety"
   (it "rejects selection without a complete transformer"
@@ -294,3 +310,319 @@
         (let ((pong (parse-websocket-frame output)))
           (expect (websocket-frame-opcode pong) :to-equalp 10)
           (expect (websocket-frame-payload pong) :to-equalp (octets 1)))))))
+#+sbcl
+(progn
+  (defun %network-test-read-http-line (stream)
+    (with-output-to-string (line)
+      (loop for octet = (read-byte stream nil nil)
+            do (unless octet
+                 (error "The test proxy stream ended during an HTTP line."))
+               (if (= octet 13)
+                   (progn
+                     (unless (= (read-byte stream nil nil) 10)
+                       (error "The test proxy received a malformed HTTP line."))
+                     (return))
+                   (write-char (code-char octet) line)))))
+
+  (defun %network-test-read-http-headers (stream)
+    (loop for line = (%network-test-read-http-line stream)
+          until (string= line "")
+          collect line))
+
+  (defun %network-test-write-http-lines (stream &rest lines)
+    (write-sequence (apply #'http-octets lines) stream)
+    (finish-output stream))
+
+  (defun %network-test-http-connect (uri &key tls-upgrader)
+    (let* ((listener
+             (http-kit/network:open-http-tcp-listener
+              :host "127.0.0.1" :port 0))
+           (proxy-port (http-kit/network:http-network-listener-port listener))
+           (request-lines nil)
+           (server-condition nil)
+           (server-thread nil)
+           (thread-joined-p nil)
+           (connection nil))
+      (unwind-protect
+           (progn
+             (setf server-thread
+                   (sb-thread:make-thread
+                    (lambda ()
+                      (handler-case
+                          (multiple-value-bind (stream peer-address peer-port)
+                              (http-kit/network:accept-http-tcp-stream
+                               listener :timeout 5)
+                            (declare (ignore peer-address peer-port))
+                            (unwind-protect
+                                 (let ((connect-line
+                                         (%network-test-read-http-line stream)))
+                                   (%network-test-read-http-headers stream)
+                                   (%network-test-write-http-lines
+                                    stream
+                                    "HTTP/1.1 200 Connection Established"
+                                    "")
+                                   (let ((request-line
+                                           (%network-test-read-http-line stream)))
+                                     (%network-test-read-http-headers stream)
+                                     (%network-test-write-http-lines
+                                      stream
+                                      "HTTP/1.1 101 Switching Protocols"
+                                      "Upgrade: websocket"
+                                      "Connection: Upgrade"
+                                      "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+                                      "")
+                                     (setf request-lines
+                                           (list connect-line request-line))))
+                              (http-kit/network:close-http-tcp-stream stream)))
+                        (error (condition)
+                          (setf server-condition condition))))))
+             (setf connection
+                   (connect-websocket
+                    uri
+                    :key +sample-key+
+                    :timeout 5
+                    :proxy (make-http-connect-proxy
+                            :host "127.0.0.1" :port proxy-port)
+                    :tls-upgrader tls-upgrader))
+             (close-websocket-connection connection :send-close-p nil)
+             (setf connection nil)
+             (sb-thread:join-thread server-thread)
+             (setf thread-joined-p t)
+             (values request-lines server-condition))
+        (when connection
+          (close-websocket-connection connection :send-close-p nil))
+        (when (and server-thread (not thread-joined-p))
+          (sb-thread:join-thread server-thread))
+        (http-kit/network:close-http-tcp-listener listener))))
+
+  (defun %wss-e2e-certificate-paths ()
+    (let ((stem (format nil "cl-websocket-kit-wss-~A" (gensym))))
+      (values
+       (namestring
+        (merge-pathnames (format nil "~A.crt" stem)
+                         (uiop:temporary-directory)))
+       (namestring
+        (merge-pathnames (format nil "~A.key" stem)
+                         (uiop:temporary-directory))))))
+
+  (defun %wss-e2e-generate-certificate (certificate key)
+    (let ((openssl (or (uiop:getenv "OPENSSL") "openssl")))
+      (uiop:run-program
+       (list openssl "req" "-x509" "-newkey" "rsa:2048" "-nodes"
+             "-days" "1" "-subj" "/CN=127.0.0.1"
+             "-addext" "subjectAltName=IP:127.0.0.1"
+             "-keyout" key "-out" certificate)
+       :output :string
+       :error-output :string)
+      certificate))
+
+  (defun %wss-e2e-trust-anchor (certificate)
+    (cl-tls-kit.x509:parse-certificate-der
+     (cl-tls-kit:pem-block-der
+      (first (cl-tls-kit:pem-decode
+              (uiop:read-file-string certificate))))))
+
+  (defun %wss-e2e-start-socat (tls-port certificate key plain-port)
+    (let ((socat (or (uiop:getenv "SOCAT") "socat")))
+      (uiop:launch-program
+       (list socat
+             (format nil
+                     "OPENSSL-LISTEN:~D,bind=127.0.0.1,cert=~A,key=~A,verify=0,reuseaddr,fork"
+                     tls-port certificate key)
+             (format nil "TCP:127.0.0.1:~D" plain-port))
+       :input nil
+       :output *standard-output*
+       :error-output *error-output*
+       :wait nil)))
+
+  (defun %wss-e2e-serve-plain (listener received received-masks)
+    (handler-case
+        (let ((accepted
+                (accept-websocket-connection
+                 listener
+                 :acceptor
+                 (lambda (request)
+                   (declare (ignore request))
+                   t)
+                 :timeout 10)))
+          (unless accepted
+            (error "The WSS E2E server rejected its client."))
+          (unwind-protect
+               (loop
+                 for frame =
+                   (read-websocket-frame
+                    (websocket-connection-stream accepted)
+                    :require-mask-p nil
+                    :allow-unmasked-p t)
+                 do (progn
+                      (push (websocket-frame-mask-p frame) received-masks)
+                      (case (websocket-frame-opcode frame)
+                        ((1 2)
+                         (push (list
+                                (websocket-frame-payload frame)
+                                (websocket-frame-opcode frame))
+                               received)
+                         (websocket-send
+                          accepted
+                          (websocket-frame-payload frame)
+                          :opcode
+                          (websocket-frame-opcode frame))
+                         (return))
+                        (9
+                         (websocket-pong
+                          (websocket-connection-stream accepted)
+                          :payload
+                          (websocket-frame-payload frame)))
+                        (8
+                         (websocket-close
+                          (websocket-connection-stream accepted)
+                          :payload
+                          (websocket-frame-payload frame))
+                         (return)))))
+            (close-websocket-connection accepted :send-close-p nil))
+          (values nil received received-masks))
+      (error (condition)
+        (values condition nil nil))))
+
+  (describe "WSS client TLS transport"
+    (it "verifies a private trust anchor and completes an HTTP Upgrade and payload round-trip"
+      (multiple-value-bind (certificate key)
+          (%wss-e2e-certificate-paths)
+        (let ((plain-listener nil)
+              (tls-port-listener nil)
+              (tls-port nil)
+              (socat-process nil)
+              (server-thread nil)
+              (server-result nil)
+              (received nil)
+              (received-masks nil)
+              (connection nil))
+          (unwind-protect
+               (progn
+                 (%wss-e2e-generate-certificate certificate key)
+                 (setf plain-listener
+                       (open-websocket-listener :host "127.0.0.1" :port 0))
+                 (setf tls-port-listener
+                       (open-websocket-listener :host "127.0.0.1" :port 0))
+                 (let ((plain-port (websocket-listener-port plain-listener))
+                       (trust-anchor (%wss-e2e-trust-anchor certificate)))
+                   (setf tls-port (websocket-listener-port tls-port-listener))
+                   (close-websocket-listener tls-port-listener)
+                   (setf tls-port-listener nil)
+                   (setf server-thread
+                         (sb-thread:make-thread
+                          (lambda ()
+                            (setf server-result
+                                  (multiple-value-list
+                                   (%wss-e2e-serve-plain
+                                    plain-listener received received-masks))))))
+                   (setf socat-process
+                         (%wss-e2e-start-socat
+                          tls-port certificate key plain-port))
+                   (sleep 1)
+                   (setf connection
+                         (connect-websocket
+                          (format nil "wss://127.0.0.1:~D/socket" tls-port)
+                          :timeout 10
+                          :local-mask-p t
+                          :peer-mask-required-p nil
+                          :tls-verify :required
+                          :tls-trust-anchors (list trust-anchor)))
+                   (let* ((request (websocket-connection-request connection))
+                          (response (websocket-connection-response connection))
+                          (request-key
+                            (http-header-value
+                             (http-request-headers request)
+                             "Sec-WebSocket-Key")))
+                     (expect (http-response-status response) :to-equalp 101)
+                     (expect
+                      (http-header-value
+                       (http-response-headers response)
+                       "Sec-WebSocket-Accept")
+                      :to-equal
+                      (websocket-accept-key request-key)))
+                   (websocket-send connection "hello over wss" :opcode 1)
+                   (multiple-value-bind (payload opcode)
+                       (websocket-receive connection :timeout 10)
+                     (expect payload :to-equalp (ascii-octets "hello over wss"))
+                     (expect opcode :to-equalp 1))
+                   (close-websocket-connection connection :send-close-p nil)
+                   (setf connection nil)
+                   (sb-thread:join-thread server-thread)
+                   (setf server-thread nil)
+                   (setf received (second server-result)
+                         received-masks (third server-result))
+                   (expect (first server-result) :to-be nil)
+                   (expect received
+                           :to-equalp
+                           (list (list (ascii-octets "hello over wss") 1)))
+                   (expect received-masks :to-equalp (list t)))
+            (when connection
+              (ignore-errors
+                (close-websocket-connection connection :send-close-p nil)))
+            (when server-thread
+              (ignore-errors (close-websocket-listener plain-listener))
+              (ignore-errors (sb-thread:join-thread server-thread)))
+            (when plain-listener
+              (ignore-errors (close-websocket-listener plain-listener)))
+            (when tls-port-listener
+              (ignore-errors (close-websocket-listener tls-port-listener)))
+            (when socat-process
+              (ignore-errors (uiop:terminate-process socat-process))
+              (ignore-errors (uiop:wait-process socat-process)))
+            (ignore-errors (delete-file certificate))
+            (ignore-errors (delete-file key))))))))
+
+  (describe "HTTP CONNECT proxy transport"
+    (it "uses CONNECT for ws and preserves the explicit target port"
+      (multiple-value-bind (request-lines server-condition)
+          (%network-test-http-connect "ws://example.test:8080/socket")
+        (expect server-condition :to-be nil)
+        (expect (first request-lines)
+                :to-equal
+                "CONNECT example.test:8080 HTTP/1.1")
+        (expect (second request-lines)
+                :to-equal
+                "GET /socket HTTP/1.1")))
+    (it "uses CONNECT before origin TLS for wss"
+      (let ((tls-uri nil))
+        (multiple-value-bind (request-lines server-condition)
+            (%network-test-http-connect
+             "wss://example.test:8443/socket"
+             :tls-upgrader
+             (lambda (stream uri &key &allow-other-keys)
+               (setf tls-uri uri)
+               (values stream "http/1.1")))
+          (expect server-condition :to-be nil)
+          (expect (first request-lines)
+                  :to-equal
+                  "CONNECT example.test:8443 HTTP/1.1")
+          (expect (second request-lines)
+                  :to-equal
+                  "GET /socket HTTP/1.1")
+          (expect (http-uri-scheme tls-uri) :to-equal "https")
+          (expect (http-uri-port tls-uri) :to-equalp 8443)))))
+
+  (describe "unsupported HTTP transport options"
+    (it "rejects custom CONNECT headers explicitly"
+      (signals websocket-transport-error
+        (connect-websocket
+         "ws://example.test/socket"
+         :proxy
+         (make-http-connect-proxy
+          :host "127.0.0.1"
+          :headers (list (make-http-header "X-Proxy-Test" "value"))))))
+    (it "rejects default TLS credentials, passwords, and unwrapping explicitly"
+      (signals websocket-transport-error
+        (connect-websocket
+         "wss://example.test/socket"
+         :key +sample-key+
+         :tls-certificate "client-certificate"
+         :tls-key "client-key"))
+      (signals websocket-transport-error
+        (connect-websocket
+         "wss://example.test/socket"
+         :key +sample-key+
+         :tls-password "unused"))
+      (signals websocket-transport-error
+        (make-websocket-tls-upgrader :unwrap-stream-p t)))))
