@@ -2,20 +2,23 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-cl-websocket-kit implements RFC 6455 together with a bounded HTTP/1.1, HTTP/2,
-and HTTP/3 network transport layer: frame encoding and decoding, masking,
-fragmentation, control frames, close codes, UTF-8 validation, bounded message
-assembly, the permessage-deflate extension, the HTTP Upgrade handshake,
-persistent HTTP/1.1 connections, HTTP/2 and HTTP/3 extended CONNECT
-bootstrapping, TCP client/listener lifecycle, optional TLS, and HTTP
-CONNECT/SOCKS5 proxy traversal.
+cl-websocket-kit implements RFC 6455. Its built-in TCP client and listener use
+HTTP/1.1; its HTTP/2 and HTTP/3 extended CONNECT support is transport-agnostic.
+Features include frame encoding and decoding, masking, fragmentation, control
+frames, close codes, UTF-8 validation, bounded message assembly, the
+permessage-deflate extension, the HTTP Upgrade handshake, persistent HTTP/1.1
+connections, HTTP/2 and HTTP/3 extended CONNECT codecs and sessions, TCP
+client/listener lifecycle, TLS client upgrading, TLS 1.3 WSS listeners, and
+HTTP CONNECT/SOCKS5 proxy traversal.
 
 It uses
 [cl-http-message-kit](https://github.com/nerima-lisp/cl-http-message-kit) for
 HTTP request and response values and `cl-http-kit/http2` plus
 `cl-http-kit/http3` for the HTTP/2 and HTTP/3 header and frame codecs. Native
-TCP and DNS support is provided on SBCL. TLS is optional and loaded through
-`cl+ssl` when that system is installed.
+TCP and DNS support is provided on SBCL. Client-side TLS uses `cl-http-kit` by
+default through `make-websocket-tls-upgrader`; `connect-websocket` also accepts
+a custom `:tls-upgrader` callback. The WSS server wrapper delegates TLS 1.3 to
+`cl-http-kit` and requires SBCL.
 
 ## Install
 
@@ -67,7 +70,7 @@ A masking key is never generated implicitly. `make-websocket-frame` takes
 is stated at the client boundary rather than buried in a library default.
 
 `make-websocket-upgrade-request` likewise requires `:key`, the Base64
-`Sec-WebSocket-Key`, for the same reason.
+`Sec-WebSocket-Key`.
 
 WebSocket URI strings using `ws` or `wss` are accepted by
 `make-websocket-upgrade-request` and mapped to the underlying HTTP model as
@@ -76,12 +79,13 @@ WebSocket URI strings using `ws` or `wss` are accepted by
 The server-side request predicate enforces the HTTP Upgrade invariants that
 belong to this layer: `GET` over HTTP/1.1, exactly one valid `Host`, upgrade
 and connection tokens, version 13, a valid key, no request body or trailers,
-and syntactically valid protocol and extension fields. Origin authorization
-is policy-controlled: an
-`origin-policy` function can authorize the Origin header;
-`make-websocket-origin-policy` builds a strict exact-match allowlist predicate
-for browser-facing listeners. The response builder and client validator only
-accept protocols and extension names that were offered by the peer.
+and syntactically valid protocol and extension fields. When `:origin-policy`
+is `NIL`, the listener permits any Origin. Browser clients using cookie
+authentication should set an exact-match allowlist with
+`make-websocket-origin-policy`. Origin checks are not authentication. The
+listener example below shows how to pass the policy. The response builder and
+client validator only accept protocols and extension names that were offered
+by the peer.
 
 Text messages and close reasons are validated as UTF-8. Peer-originated
 invalid UTF-8 is signaled as `websocket-invalid-data`; size violations use
@@ -131,6 +135,56 @@ message, payload, fragment, and control-frame limits. Explicit `NIL` can
 disable the HTTP/1.1 timeout or boundary for a low-level caller, while
 session message limits must be positive integers when overridden.
 
+### Listener concurrency and timeouts
+
+`serve-websocket-listener` accepts `:worker-count`, `:session-timeout`, and
+`:idle-timeout`. It defaults to one worker, while `:session-timeout` and
+`:idle-timeout` default to `NIL`, so established sessions have no session or
+idle timeout unless the application sets one. A single worker can remain
+occupied by an idle client. On SBCL, create `listener` with
+`(websocket-kit:open-websocket-listener :port 8080)` and define
+`handle-websocket-message` in your application. Configure multiple workers and
+finite timeouts, for example:
+
+```lisp
+(websocket-kit:serve-websocket-listener
+ listener
+ #'handle-websocket-message
+ :worker-count 4
+ :session-timeout 3600
+ :idle-timeout 300
+ :origin-policy
+ (websocket-kit:make-websocket-origin-policy
+  '("https://app.example.com")))
+```
+
+Timeout values are seconds. This example allows four concurrent sessions,
+limits each session to one hour, and closes an inactive connection after five
+minutes. The Origin allowlist matches `https://app.example.com` exactly. To send
+an automatic Ping when a session is otherwise idle, set `:heartbeat-interval`;
+`:heartbeat-timeout` defaults to that interval and closes the session if the
+matching Pong does not arrive. `serve-websocket-listener` forwards both options
+to each session.
+
+`make-websocket-tls-server-wrapper` provides TLS 1.3 for
+`open-websocket-listener` through its `:tls-wrapper` argument. It delegates to
+`http-kit/tls:make-http-tls-server-wrapper`. Pass `:certificate-chain` as a
+leaf-first list of DER certificates and `:private-key` as the matching
+`cl-crypto-kit` P-256 or Ed25519 key. The default ALPN list is `("http/1.1")`,
+and any configured list must include `http/1.1` for the HTTP/1.1 WebSocket
+handshake. Only HTTP/1.1 is handled; if a different configured ALPN protocol is
+negotiated, the listener rejects the connection. `accept-websocket-connection`
+starts one absolute deadline when called and uses it for TCP accept, the TLS
+handshake, and the subsequent HTTP upgrade. The delegated wrapper receives the
+same deadline and sends no TLS alert after it expires.
+
+The WSS server does not send TLS 1.3 `NewSessionTicket` messages, so TLS session
+resumption is unavailable and each connection performs a full handshake.
+The delegated wrapper uses fixed TLS record limits of 16,384 plaintext bytes
+and 16,640 ciphertext bytes, plus a fixed 1 MiB handshake-message limit. Its
+public arguments do not configure these limits or an aggregate certificate
+chain size/count limit; the X.509 parser limits each certificate to 1 MiB.
+
 The built-in request, response, and network path is HTTP/1.1. The kit also
 provides transport-agnostic HTTP/2 and HTTP/3 extended CONNECT header, frame,
 and SETTINGS codecs, including stateful HPACK/QPACK handling and HTTP/2
@@ -170,10 +224,7 @@ transport callbacks as `:deadline`; calls without a deadline retain the
 legacy callback shape.
 WebSocket extension payload transformations are integrated through
 `PAYLOAD-ENCODER`, `PAYLOAD-DECODER`, and RSV options on frame, message,
-connection, and session APIs. The bundled permessage-deflate codec can be used
-as the concrete codec, but negotiation/selection policy and the per-connection
-state choice remain application-controlled; validate its RSV/message semantics
-before enabling the matching RSV bit.
+connection, and session APIs.
 
 ## API
 
@@ -195,6 +246,3 @@ before enabling the matching RSV bit.
 the specific ones first: a budget breach closes with 1009, invalid UTF-8 with
 1007, and any other protocol fault with 1002.
 
-## License
-
-MIT. See [LICENSE](LICENSE).

@@ -613,10 +613,12 @@ must return a one-dimensional unsigned-byte vector."
      octets)
    deadline clock-function operation))
 
-(defun %websocket-network-close-stream (stream)
+(defun %websocket-network-close-stream (stream &key (abort-p t))
   (when stream
     (%websocket-with-cleanup
-      (http-kit/network:close-http-tcp-stream stream)))
+      (if abort-p
+          (http-kit/network:close-http-tcp-stream stream)
+          (close stream))))
   nil)
 
 (defparameter +websocket-max-informational-responses+ 16)
@@ -710,11 +712,11 @@ must return a one-dimensional unsigned-byte vector."
       (%websocket-network-close-stream stream)))
   nil)
 
-(defun %websocket-network-force-close-connection (connection)
+(defun %websocket-network-close-connection (connection)
   (when (websocket-connection-p connection)
     (let ((stream (websocket-connection-stream connection)))
       (%websocket-network-mark-closed connection)
-      (%websocket-network-close-stream stream)))
+      (%websocket-network-close-stream stream :abort-p nil)))
   nil)
 
 (defun %websocket-network-output-key-function
@@ -904,8 +906,7 @@ operations on one connection are serialized."
                                         connection
                                         :code close-code
                                         :reason close-reason)
-                                       (%websocket-network-close-stream
-                                        stream)))))
+                                       (%websocket-network-close-stream stream :abort-p nil)))))
                                 (10 nil))))
                      (let ((read-result
                              (catch close-tag
@@ -977,7 +978,7 @@ The stream is closed even when sending the Close frame signals an error."
   (let ((effective-deadline
           (%websocket-effective-deadline timeout deadline clock-function)))
     (if (not send-close-p)
-        (%websocket-network-force-close-connection connection)
+        (%websocket-network-close-connection connection)
         (%websocket-network-with-write-lock (connection)
           (if (websocket-connection-closed-p connection)
               nil
@@ -1013,7 +1014,7 @@ The stream is closed even when sending the Close frame signals an error."
                      :code close-code
                      :reason close-reason
                      :condition failure)
-                    (%websocket-network-close-stream stream))
+                    (%websocket-network-close-stream stream :abort-p (not (null failure))))
                   t)))))))
 
 (defun %websocket-tls-package ()
@@ -1097,54 +1098,27 @@ TLS callbacks may return the selected ALPN protocol as a second value."
    :clock-function clock-function))
 
 (defun make-websocket-tls-server-wrapper
-    (&key certificate key password (alpn-protocols '("http/1.1"))
-          (unwrap-stream-p nil)
-          (clock-function #'%websocket-monotonic-time))
-  "Return a server callback that upgrades an accepted stream to TLS.
+    (&key certificate-chain private-key
+          (alpn-protocols (list "http/1.1"))
+          (clock-function (function %websocket-monotonic-time)))
+  "Return a WebSocket listener TLS callback backed by cl-http-kit.
 
-CERTIFICATE and KEY are required because a server cannot complete a TLS
-handshake without an identity. The callback returns the selected ALPN
-protocol as a second value when cl+ssl reports one."
-  (unless (%websocket-valid-certificate-pair-p certificate key t)
-    (%websocket-protocol-error
-     "TLS server certificates require both CERTIFICATE and KEY."
-     (list :certificate certificate :key key)))
+CERTIFICATE-CHAIN is a list of DER certificates, leaf first. PRIVATE-KEY
+is the matching cl-crypto-kit P-256 or Ed25519 key. ALPN-PROTOCOLS must
+include HTTP/1.1."
   (unless (%websocket-valid-alpn-protocols-p alpn-protocols)
     (%websocket-protocol-error
      "TLS ALPN-PROTOCOLS must be a list of non-empty ASCII protocol names."
      alpn-protocols))
-  (when (and alpn-protocols
-             (not (member "http/1.1" alpn-protocols :test #'string=)))
+  (unless (member "http/1.1" alpn-protocols :test (function string=))
     (%websocket-protocol-error
      "TLS server ALPN-PROTOCOLS must include HTTP/1.1."
      alpn-protocols))
-  (unless (functionp clock-function)
-    (%websocket-protocol-error
-     "TLS CLOCK-FUNCTION must be callable."
-     clock-function))
-  (let ((make-server-stream (%websocket-tls-function "MAKE-SSL-SERVER-STREAM")))
-    (lambda (stream &key timeout deadline &allow-other-keys)
-      (unless (streamp stream)
-        (%websocket-protocol-error
-         "TLS upgrade requires a Lisp stream."
-         stream))
-      (let ((effective-deadline
-              (%websocket-effective-deadline
-               timeout deadline clock-function)))
-        (let ((tls-stream
-                (%websocket-call-with-deadline
-                 (lambda ()
-                   (funcall make-server-stream
-                            stream
-                            :unwrap-stream-p unwrap-stream-p
-                            :external-format nil
-                            :alpn-protocols alpn-protocols
-                            :certificate certificate
-                            :key key
-                            :password password))
-                 effective-deadline clock-function :tls)))
-          (values tls-stream
-                  (websocket-tls-selected-alpn-protocol tls-stream)))))))
+  (%websocket-make-tls-server-wrapper
+   :certificate-chain certificate-chain
+   :private-key private-key
+   :alpn-protocols alpn-protocols
+   :clock-function clock-function))
 
 (defun %websocket-network-proxy-open-stream
     (raw-opener websocket-proxy raw-stream-pair clock-function)
