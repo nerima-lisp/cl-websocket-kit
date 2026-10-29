@@ -4,7 +4,7 @@
   :description "HTTP/1.1, HTTP/2, HTTP/3, and RFC 6455 WebSocket framing, transport, and sessions."
   :author "nerima-lisp"
   :license "MIT"
-  :version "0.1.0"
+  :version "0.2.0"
   :depends-on ("cl-http-message-kit"
                "cl-http-kit/client"
                "cl-http-kit/network"
